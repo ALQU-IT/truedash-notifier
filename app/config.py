@@ -9,10 +9,8 @@ CONFIG_PATH = Path(os.getenv("CONFIG_PATH", "/data/config.json"))
 
 class Config(BaseModel):
     device_token: str
-    apns_key_id: str
-    apns_team_id: str
-    apns_key_pem: str
-    bundle_id: str = "ALQU-IT.TrueDash"
+    relay_url: str          # e.g. https://relay.alqu.ch
+    relay_token: str        # shared secret for relay authentication
     truenas_host: str
     truenas_port: int = 443
     truenas_api_key: str

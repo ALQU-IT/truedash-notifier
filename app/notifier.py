@@ -1,4 +1,3 @@
-import asyncio
 import logging
 
 import apns
@@ -7,7 +6,7 @@ import truenas
 
 log = logging.getLogger(__name__)
 
-# In-memory state for notification deduplication (mirrors iOS NotificationManager logic).
+# In-memory state for deduplication — mirrors iOS NotificationManager thresholds.
 _state: dict = {}
 
 
@@ -28,12 +27,12 @@ async def check_and_notify() -> None:
         log.warning(f"TrueNAS fetch failed: {e}")
         return
 
-    # Enrich pools with logical dataset space (same as iOS app).
+    # Enrich pools with logical dataset space.
     for pool in pools_raw:
         try:
             ds = await truenas.get_dataset(
                 conf.truenas_host, conf.truenas_port, conf.truenas_api_key,
-                pool["name"], conf.verify_tls
+                pool["name"], conf.verify_tls,
             )
             if ds:
                 pool["_used"] = ds["used"]["parsed"]
@@ -41,23 +40,22 @@ async def check_and_notify() -> None:
         except Exception:
             pass
 
-    await _check_pool_space(pools_raw, conf)
-    await _check_pool_health(pools_raw, conf)
-    await _check_app_updates(apps_raw, conf)
-
-
-async def _push(title: str, body: str, conf: cfg_module.Config) -> None:
-    ok = await apns.push(
-        conf.device_token, title, body,
-        conf.apns_key_pem, conf.apns_key_id, conf.apns_team_id, conf.bundle_id,
+    triggered = (
+        _check_pool_space(pools_raw)
+        or _check_pool_health(pools_raw)
+        or _check_app_updates(apps_raw)
     )
-    if ok:
-        log.info(f"Push sent: {title}")
-    else:
-        log.warning(f"Push failed: {title}")
+
+    if triggered:
+        ok = await apns.wake(conf.device_token, conf.relay_url, conf.relay_token)
+        if ok:
+            log.info("Wake sent to relay")
+        else:
+            log.warning("Wake delivery failed")
 
 
-async def _check_pool_space(pools: list, conf: cfg_module.Config) -> None:
+def _check_pool_space(pools: list) -> bool:
+    triggered = False
     for pool in pools:
         pid = pool.get("id", pool.get("name"))
         used = pool.get("_used")
@@ -68,45 +66,34 @@ async def _check_pool_space(pools: list, conf: cfg_module.Config) -> None:
         if total == 0:
             continue
         free_pct = avail / total * 100
-        free_gb = avail / 1_073_741_824
         key = f"pool_space_{pid}"
         was_alerting = _state.get(key, False)
         if free_pct < 20 and not was_alerting:
-            await _push(
-                "Low Pool Space",
-                f"Pool \"{pool['name']}\" has {free_pct:.0f}% free ({free_gb:.1f} GB)",
-                conf,
-            )
             _state[key] = True
+            triggered = True
         elif free_pct >= 25 and was_alerting:
             _state[key] = False
+    return triggered
 
 
-async def _check_pool_health(pools: list, conf: cfg_module.Config) -> None:
+def _check_pool_health(pools: list) -> bool:
+    triggered = False
     for pool in pools:
         pid = pool.get("id", pool.get("name"))
         status = pool.get("status", "ONLINE").upper()
         key = f"pool_health_{pid}"
         last = _state.get(key, "ONLINE")
         if status != "ONLINE" and last == "ONLINE":
-            await _push(
-                "Pool Health Alert",
-                f"Pool \"{pool['name']}\" is now {status.capitalize()}",
-                conf,
-            )
+            triggered = True
         _state[key] = status
+    return triggered
 
 
-async def _check_app_updates(apps: list, conf: cfg_module.Config) -> None:
+def _check_app_updates(apps: list) -> bool:
     updatable = sum(
         1 for a in apps if a.get("upgrade_available") or a.get("update_available")
     )
     last = _state.get("app_updates", 0)
-    if updatable > 0 and updatable > last:
-        if updatable == 1:
-            title, body = "App Update Available", "1 app has an update available"
-        else:
-            title = f"{updatable} App Updates Available"
-            body = f"{updatable} apps have updates available"
-        await _push(title, body, conf)
+    triggered = updatable > 0 and updatable > last
     _state["app_updates"] = updatable
+    return triggered
