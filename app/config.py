@@ -9,7 +9,7 @@ CONFIG_PATH = Path(os.getenv("CONFIG_PATH", "/data/config.json"))
 
 class Config(BaseModel):
     device_token: str
-    relay_url: str          # e.g. https://relay.alqu.ch
+    relay_url: str          # e.g. https://truedash-relay.alqu.ch
     relay_token: str        # shared secret for relay authentication
     truenas_host: str
     truenas_port: int = 443
