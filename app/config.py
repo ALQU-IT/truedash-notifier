@@ -1,21 +1,27 @@
-import json
 import os
 from pathlib import Path
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 CONFIG_PATH = Path(os.getenv("CONFIG_PATH", "/data/config.json"))
 
 
 class Config(BaseModel):
     device_token: str
-    relay_url: str          # e.g. https://truedash-relay.alqu.ch
-    relay_token: str        # shared secret for relay authentication
+    relay_url: str
+    relay_token: str
     truenas_host: str
     truenas_port: int = 443
     truenas_api_key: str
-    verify_tls: bool = False
-    poll_interval: int = 900  # seconds, default 15 min
+    verify_tls: bool = True
+    poll_interval: int = Field(default=600, ge=60)
+
+    @field_validator("relay_url")
+    @classmethod
+    def relay_url_must_be_https(cls, v: str) -> str:
+        if not v.lower().startswith("https://"):
+            raise ValueError("relay_url must use https://")
+        return v
 
 
 def load() -> Optional[Config]:
@@ -30,6 +36,7 @@ def load() -> Optional[Config]:
 def save(cfg: Config) -> None:
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(cfg.model_dump_json(indent=2))
+    CONFIG_PATH.chmod(0o600)
 
 
 def delete() -> None:

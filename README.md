@@ -4,7 +4,7 @@ A lightweight Docker container that runs on your TrueNAS SCALE server and delive
 
 ## What it does
 
-Polls your TrueNAS server every 15 minutes and sends a push notification when:
+Polls your TrueNAS server every 10 minutes and sends a push notification when:
 
 - **Pool space** drops below 20% free (clears above 25%)
 - **Pool health** changes from ONLINE (degraded, faulted, etc.)
@@ -69,8 +69,8 @@ curl -X POST http://<truenas-ip>:7842/api/register \
 
 | Field | Default | Description |
 |---|---|---|
-| `poll_interval` | `900` | Seconds between checks (min 60) |
-| `verify_tls` | `false` | Verify TrueNAS TLS certificate (disable for self-signed) |
+| `poll_interval` | `600` | Seconds between checks (min 60) |
+| `verify_tls` | `true` | Verify TrueNAS TLS certificate (set to false for self-signed certs) |
 
 ## Requirements
 

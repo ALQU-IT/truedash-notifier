@@ -26,13 +26,13 @@ async def _poll_loop() -> None:
     await asyncio.sleep(10)
     while True:
         conf = cfg_module.load()
-        interval = conf.poll_interval if conf else 300
+        interval = conf.poll_interval if conf else 600
         log.info("Running scheduled check")
         try:
             await notifier.check_and_notify()
+            _last_check = datetime.now(timezone.utc)
         except Exception as e:
             log.error(f"Unexpected error during check: {e}")
-        _last_check = datetime.now(timezone.utc)
         await asyncio.sleep(interval)
 
 
@@ -55,8 +55,8 @@ class RegisterRequest(BaseModel):
     truenas_host: str
     truenas_port: int = 443
     truenas_api_key: str
-    verify_tls: bool = False
-    poll_interval: int = 900
+    verify_tls: bool = True
+    poll_interval: int = 600
 
 
 @app.post("/api/register", status_code=200)
