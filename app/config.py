@@ -10,6 +10,7 @@ class Config(BaseModel):
     device_token: str
     relay_url: str
     relay_token: str
+    notifier_secret: str
     truenas_host: str
     truenas_port: int = 443
     truenas_api_key: str

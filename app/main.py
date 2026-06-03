@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 import config as cfg_module
@@ -22,7 +22,6 @@ _poll_task: Optional[asyncio.Task] = None
 
 async def _poll_loop() -> None:
     global _last_check
-    # Short initial delay so the service is ready before the first check.
     await asyncio.sleep(10)
     while True:
         conf = cfg_module.load()
@@ -48,6 +47,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="TrueDash Notifier", version="1.0.0", lifespan=lifespan)
 
 
+def _require_auth(authorization: Optional[str], conf: cfg_module.Config) -> None:
+    token = None
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:]
+    if token != conf.notifier_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
 class RegisterRequest(BaseModel):
     device_token: str
     relay_url: str
@@ -57,30 +64,44 @@ class RegisterRequest(BaseModel):
     truenas_api_key: str
     verify_tls: bool = True
     poll_interval: int = 600
+    notifier_secret: str
 
 
 @app.post("/api/register", status_code=200)
-async def register(req: RegisterRequest):
+async def register(
+    req: RegisterRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    existing = cfg_module.load()
+    if existing is not None:
+        _require_auth(authorization, existing)
+
     conf = cfg_module.Config(**req.model_dump())
     cfg_module.save(conf)
     log.info(f"Device registered: ...{req.device_token[-6:]}")
-    # Kick off an immediate check in the background.
     asyncio.create_task(notifier.check_and_notify())
     return {"status": "registered"}
 
 
 @app.get("/api/status")
-async def status():
+async def status(authorization: Optional[str] = Header(default=None)):
     conf = cfg_module.load()
+    if conf is None:
+        return {"registered": False, "last_check": None, "version": "1.0.0"}
+    _require_auth(authorization, conf)
     return {
-        "registered": conf is not None,
+        "registered": True,
         "last_check": _last_check.isoformat() if _last_check else None,
         "version": "1.0.0",
     }
 
 
 @app.delete("/api/unregister", status_code=200)
-async def unregister():
+async def unregister(authorization: Optional[str] = Header(default=None)):
+    conf = cfg_module.load()
+    if conf is None:
+        raise HTTPException(status_code=404, detail="Not registered")
+    _require_auth(authorization, conf)
     cfg_module.delete()
     log.info("Device unregistered")
     return {"status": "unregistered"}
