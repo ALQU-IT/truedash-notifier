@@ -1,6 +1,6 @@
 # TrueDash Notifier
 
-A lightweight Docker container that runs on your TrueNAS SCALE server and delivers reliable push notifications to the TrueDash iOS app via APNs — even when your iPhone hasn't opened the app in days.
+A lightweight Docker container that runs on your TrueNAS SCALE server and delivers push notifications to the TrueDash iOS app — even when your iPhone hasn't opened the app in days.
 
 ## What it does
 
@@ -13,24 +13,14 @@ Polls your TrueNAS server every 15 minutes and sends a push notification when:
 ## How it works
 
 ```
-TrueNAS REST API → TrueDash Notifier → APNs → iPhone
+TrueNAS REST API → TrueDash Notifier → truedash-relay.alqu.ch → APNs → iPhone
 ```
 
-The container runs on TrueNAS itself, polls the local API, and pushes directly to Apple's notification servers. No third-party relay, no cloud backend.
+The container runs on TrueNAS itself and polls the local API. When an alert condition is detected, it sends a wake signal to the TrueDash relay service, which forwards the push notification to Apple's servers and on to your device.
 
 ## Setup
 
-### 1. APNs Auth Key
-
-The TrueDash iOS app handles this automatically during install. It provides:
-
-- An APNs `.p8` private key (from the ALQU-IT Apple Developer account)
-- Your device push token
-- Your TrueNAS connection details
-
-These are stored in `/data/config.json` inside the container (mounted as a persistent volume).
-
-### 2. Install via TrueDash
+### 1. Install via TrueDash
 
 In the TrueDash app:
 
@@ -40,7 +30,7 @@ In the TrueDash app:
 
 Or manually via **Settings → Notifications → Install Manually** if the automatic install isn't available for your TrueNAS version.
 
-### 3. Manual Docker install (advanced)
+### 2. Manual Docker install (advanced)
 
 ```bash
 docker run -d \
@@ -58,12 +48,11 @@ curl -X POST http://<truenas-ip>:7842/api/register \
   -H "Content-Type: application/json" \
   -d '{
     "device_token": "<your-apns-device-token>",
-    "apns_key_id": "<key-id>",
-    "apns_team_id": "<team-id>",
-    "apns_key_pem": "-----BEGIN PRIVATE KEY-----\n...",
+    "relay_url": "https://truedash-relay.alqu.ch",
+    "relay_token": "<your-relay-token>",
     "truenas_host": "192.168.1.x",
     "truenas_port": 443,
-    "truenas_api_key": "<your-api-key>"
+    "truenas_api_key": "<your-truenas-api-key>"
   }'
 ```
 
@@ -72,7 +61,7 @@ curl -X POST http://<truenas-ip>:7842/api/register \
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/register` | Register device + TrueNAS credentials |
-| `GET` | `/api/status` | Registration status, last check time |
+| `GET` | `/api/status` | Registration status and last check time |
 | `DELETE` | `/api/unregister` | Remove registration and credentials |
 | `GET` | `/health` | Container health check |
 
@@ -86,14 +75,14 @@ curl -X POST http://<truenas-ip>:7842/api/register \
 ## Requirements
 
 - TrueNAS SCALE (any recent version)
-- Outbound internet access from TrueNAS to `api.push.apple.com:443`
-- TrueDash iOS app v3.0+
+- Outbound internet access from TrueNAS to `truedash-relay.alqu.ch:443`
+- TrueDash iOS app
 
 ## Security
 
 - Credentials are stored in a Docker volume (`/data/config.json`) on your own server
-- The APNs key never leaves your network — pushes go directly from TrueNAS to Apple
-- The container has no inbound internet exposure; it only needs outbound access to APNs
+- The container only needs outbound access to TrueNAS and the relay service — no inbound internet exposure
+- The relay service handles APNs delivery; your device token and relay token are the only credentials transmitted
 
 ## License
 
