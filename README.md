@@ -16,7 +16,14 @@ Polls your TrueNAS server every 10 minutes and sends a push notification when:
 TrueNAS REST API → TrueDash Notifier → truedash-relay.alqu.ch → APNs → iPhone
 ```
 
-The container runs on TrueNAS itself and polls the local API. When an alert condition is detected, it sends a wake signal to the TrueDash relay service, which forwards the push notification to Apple's servers and on to your device.
+The container polls the local TrueNAS API. When an alert is detected, it sends a wake signal to the relay using an opaque `push_id`. The relay resolves the device token internally and forwards the push to Apple — the device token never leaves the relay.
+
+### Privacy architecture
+
+- The iOS app registers directly with the relay and receives a `push_id` (random UUID) and a per-device `relay_secret`
+- The app gives the Notifier only the `push_id` and `relay_secret` — never the raw APNs device token
+- Wake calls contain only the `push_id` — no PII passes through the Notifier or its logs
+- Each device has its own secret, independently revokable
 
 ## Setup
 
@@ -26,7 +33,7 @@ In the TrueDash app:
 
 1. Go to **Settings → Notifications**
 2. Tap **Install Notifier on TrueNAS**
-3. The app deploys the container and registers your device automatically
+3. The app registers with the relay, then deploys and configures the container automatically
 
 Or manually via **Settings → Notifications → Install Manually** if the automatic install isn't available for your TrueNAS version.
 
@@ -41,15 +48,16 @@ docker run -d \
   ghcr.io/alqu-it/truedash-notifier:latest
 ```
 
-Then register from the TrueDash app or via the API directly:
+Then register (the `push_id` and `relay_secret` come from the relay registration step in the app):
 
 ```bash
 curl -X POST http://<truenas-ip>:7842/api/register \
   -H "Content-Type: application/json" \
   -d '{
-    "device_token": "<your-apns-device-token>",
+    "push_id": "<uuid-from-relay>",
+    "relay_secret": "<per-device-secret-from-relay>",
     "relay_url": "https://truedash-relay.alqu.ch",
-    "relay_token": "<your-relay-token>",
+    "notifier_secret": "<choose-a-strong-secret>",
     "truenas_host": "192.168.1.x",
     "truenas_port": 443,
     "truenas_api_key": "<your-truenas-api-key>"
@@ -58,12 +66,14 @@ curl -X POST http://<truenas-ip>:7842/api/register \
 
 ## API
 
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/api/register` | Register device + TrueNAS credentials |
-| `GET` | `/api/status` | Registration status and last check time |
-| `DELETE` | `/api/unregister` | Remove registration and credentials |
-| `GET` | `/health` | Container health check |
+All endpoints except `/health` and the initial `POST /api/register` require `Authorization: Bearer <notifier_secret>`.
+
+| Method | Path | Auth required | Description |
+|---|---|---|---|
+| `POST` | `/api/register` | Only if already registered | Register device + TrueNAS credentials |
+| `GET` | `/api/status` | Yes | Registration status and last check time |
+| `DELETE` | `/api/unregister` | Yes | Remove registration and credentials |
+| `GET` | `/health` | No | Container health check |
 
 ## Configuration
 
@@ -80,9 +90,10 @@ curl -X POST http://<truenas-ip>:7842/api/register \
 
 ## Security
 
-- Credentials are stored in a Docker volume (`/data/config.json`) on your own server
-- The container only needs outbound access to TrueNAS and the relay service — no inbound internet exposure
-- The relay service handles APNs delivery; your device token and relay token are the only credentials transmitted
+- Config is stored in a Docker volume (`/data/config.json`) with `600` permissions — readable only by the container process
+- The Notifier never sees or logs the APNs device token — only the opaque `push_id`
+- The relay holds device tokens; the Notifier holds only UUIDs
+- Each device authenticates to the relay with its own per-device secret
 
 ## License
 

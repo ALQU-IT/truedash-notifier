@@ -56,15 +56,15 @@ def _require_auth(authorization: Optional[str], conf: cfg_module.Config) -> None
 
 
 class RegisterRequest(BaseModel):
-    device_token: str
+    push_id: str
+    relay_secret: str
     relay_url: str
-    relay_token: str
+    notifier_secret: str
     truenas_host: str
     truenas_port: int = 443
     truenas_api_key: str
     verify_tls: bool = True
     poll_interval: int = 600
-    notifier_secret: str
 
 
 @app.post("/api/register", status_code=200)
@@ -78,7 +78,7 @@ async def register(
 
     conf = cfg_module.Config(**req.model_dump())
     cfg_module.save(conf)
-    log.info(f"Device registered: ...{req.device_token[-6:]}")
+    log.info(f"Device registered with push_id: ...{req.push_id[-6:]}")
     asyncio.create_task(notifier.check_and_notify())
     return {"status": "registered"}
 

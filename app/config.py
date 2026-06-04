@@ -7,9 +7,9 @@ CONFIG_PATH = Path(os.getenv("CONFIG_PATH", "/data/config.json"))
 
 
 class Config(BaseModel):
-    device_token: str
+    push_id: str           # opaque UUID returned by relay on registration
+    relay_secret: str      # per-device secret returned by relay on registration
     relay_url: str
-    relay_token: str
     notifier_secret: str
     truenas_host: str
     truenas_port: int = 443
