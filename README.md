@@ -20,8 +20,8 @@ The container polls the local TrueNAS API. When an alert is detected, it sends a
 
 ### Privacy architecture
 
-- The iOS app registers directly with the relay and receives a `push_id` (random UUID) and a per-device `relay_secret`
-- The app gives the Notifier only the `push_id` and `relay_secret` — never the raw APNs device token
+- The iOS app registers directly with the relay and receives a `push_id` (random UUID) and a per-device `push_secret`
+- The app gives the Notifier only the `push_id` and `push_secret` — never the raw APNs device token
 - Wake calls contain only the `push_id` — no PII passes through the Notifier or its logs
 - Each device has its own secret, independently revokable
 
@@ -48,14 +48,14 @@ docker run -d \
   ghcr.io/alqu-it/truedash-notifier:latest
 ```
 
-Then register (the `push_id` and `relay_secret` come from the relay registration step in the app):
+Then register (the `push_id` and `push_secret` come from the relay registration step in the app):
 
 ```bash
 curl -X POST http://<truenas-ip>:7842/api/register \
   -H "Content-Type: application/json" \
   -d '{
     "push_id": "<uuid-from-relay>",
-    "relay_secret": "<per-device-secret-from-relay>",
+    "push_secret": "<per-device-secret-from-relay>",
     "relay_url": "https://truedash-relay.alqu.ch",
     "notifier_secret": "<choose-a-strong-secret>",
     "truenas_host": "192.168.1.x",

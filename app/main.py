@@ -57,7 +57,7 @@ def _require_auth(authorization: Optional[str], conf: cfg_module.Config) -> None
 
 class RegisterRequest(BaseModel):
     push_id: str
-    relay_secret: str
+    push_secret: str
     relay_url: str
     notifier_secret: str
     truenas_host: str

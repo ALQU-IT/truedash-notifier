@@ -47,7 +47,7 @@ async def check_and_notify() -> None:
     )
 
     if triggered:
-        ok = await apns.wake(conf.push_id, conf.relay_url, conf.relay_secret)
+        ok = await apns.wake(conf.push_id, conf.relay_url, conf.push_secret)
         if ok:
             log.info("Wake sent to relay")
         else:

@@ -4,7 +4,7 @@ import httpx
 log = logging.getLogger(__name__)
 
 
-async def wake(push_id: str, relay_url: str, relay_secret: str) -> bool:
+async def wake(push_id: str, relay_url: str, push_secret: str) -> bool:
     """Sends a wake signal to the relay using the opaque push_id.
     The relay resolves the device token internally — it never passes through here."""
     url = relay_url.rstrip("/") + "/wake"
@@ -13,7 +13,7 @@ async def wake(push_id: str, relay_url: str, relay_secret: str) -> bool:
             resp = await client.post(
                 url,
                 json={"push_id": push_id},
-                headers={"Authorization": f"Bearer {relay_secret}"},
+                headers={"Authorization": f"Bearer {push_secret}"},
             )
             if resp.status_code != 200:
                 log.warning(f"Relay returned {resp.status_code}: {resp.text}")
