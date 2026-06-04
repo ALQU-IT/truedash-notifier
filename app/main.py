@@ -47,11 +47,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="TrueDash Notifier", version="1.0.0", lifespan=lifespan)
 
 
-def _require_auth(authorization: Optional[str], conf: cfg_module.Config) -> None:
+def _require_auth(authorization: Optional[str], expected_secret: str) -> None:
     token = None
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:]
-    if token != conf.notifier_secret:
+    if not token or token != expected_secret:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -73,8 +73,10 @@ async def register(
     authorization: Optional[str] = Header(default=None),
 ):
     existing = cfg_module.load()
-    if existing is not None:
-        _require_auth(authorization, existing)
+    # First-time: Bearer must match the notifier_secret in the body.
+    # Re-registration: Bearer must match the stored notifier_secret.
+    expected = existing.notifier_secret if existing else req.notifier_secret
+    _require_auth(authorization, expected)
 
     conf = cfg_module.Config(**req.model_dump())
     cfg_module.save(conf)
@@ -87,8 +89,8 @@ async def register(
 async def status(authorization: Optional[str] = Header(default=None)):
     conf = cfg_module.load()
     if conf is None:
-        return {"registered": False, "last_check": None, "version": "1.0.0"}
-    _require_auth(authorization, conf)
+        raise HTTPException(status_code=404, detail="Not registered")
+    _require_auth(authorization, conf.notifier_secret)
     return {
         "registered": True,
         "last_check": _last_check.isoformat() if _last_check else None,
@@ -101,7 +103,7 @@ async def unregister(authorization: Optional[str] = Header(default=None)):
     conf = cfg_module.load()
     if conf is None:
         raise HTTPException(status_code=404, detail="Not registered")
-    _require_auth(authorization, conf)
+    _require_auth(authorization, conf.notifier_secret)
     cfg_module.delete()
     log.info("Device unregistered")
     return {"status": "unregistered"}
