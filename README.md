@@ -27,16 +27,25 @@ The app polls the local TrueNAS API. When an alert is detected, it sends a wake 
 
 ## Installation
 
-### TrueNAS Apps (recommended)
+### Recommended: TrueDash iOS app
 
-1. In the TrueNAS SCALE web UI, go to **Apps**
-2. Click **Discover Apps** → **Custom App**
-3. Set the image to `ghcr.io/alqu-it/truedash-notifier` and tag `latest`
-4. Set the container port to **7842** (TCP) and expose it on the host
-5. Add a host path or ix-volume mounted at `/data` for persistent config storage
-6. Save and start the app
+The easiest way to install and configure TrueDash Notifier is directly from the TrueDash iOS app:
 
-Then connect from the TrueDash iOS app via **Settings → Notifications → Connect to Notifier**, or register manually via the API (see below).
+1. Go to **Settings → Notifications**
+2. Tap **Install Notifier on TrueNAS**
+3. The app deploys the container on your TrueNAS server and configures everything automatically
+
+### Manual: TrueNAS Apps
+
+If you prefer to install manually via the TrueNAS SCALE web UI:
+
+1. Go to **Apps** → **Discover Apps** → **Custom App**
+2. Set the image to `ghcr.io/alqu-it/truedash-notifier` and tag `latest`
+3. Set the container port to **7842** (TCP) and expose it on the host
+4. Add a host path or ix-volume mounted at `/data` for persistent config storage
+5. Save and start the app
+
+Then connect from the TrueDash iOS app via **Settings → Notifications → Connect to Notifier**.
 
 ### Manual Docker install
 
