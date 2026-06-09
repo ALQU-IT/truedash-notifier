@@ -4,14 +4,17 @@ import httpx
 log = logging.getLogger(__name__)
 
 
-async def wake(device_token: str, relay_url: str, relay_token: str) -> bool:
-    """Calls the ALQU-IT relay which sends a silent APNs background push."""
+async def wake(push_id: str, relay_url: str, push_secret: str) -> bool:
+    """Sends a wake signal to the relay using the opaque push_id.
+    The relay resolves the device token internally — it never passes through here."""
     url = relay_url.rstrip("/") + "/wake"
-    headers = {"Authorization": f"Bearer {relay_token}"}
-    payload = {"device_token": device_token}
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(url, json=payload, headers=headers)
+            resp = await client.post(
+                url,
+                json={"push_id": push_id},
+                headers={"Authorization": f"Bearer {push_secret}"},
+            )
             if resp.status_code != 200:
                 log.warning(f"Relay returned {resp.status_code}: {resp.text}")
             return resp.status_code == 200

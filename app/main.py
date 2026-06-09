@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 import config as cfg_module
@@ -22,17 +22,16 @@ _poll_task: Optional[asyncio.Task] = None
 
 async def _poll_loop() -> None:
     global _last_check
-    # Short initial delay so the service is ready before the first check.
     await asyncio.sleep(10)
     while True:
         conf = cfg_module.load()
-        interval = conf.poll_interval if conf else 300
+        interval = conf.poll_interval if conf else 600
         log.info("Running scheduled check")
         try:
             await notifier.check_and_notify()
+            _last_check = datetime.now(timezone.utc)
         except Exception as e:
             log.error(f"Unexpected error during check: {e}")
-        _last_check = datetime.now(timezone.utc)
         await asyncio.sleep(interval)
 
 
@@ -48,39 +47,63 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="TrueDash Notifier", version="1.0.0", lifespan=lifespan)
 
 
+def _require_auth(authorization: Optional[str], expected_secret: str) -> None:
+    token = None
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:]
+    if not token or token != expected_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
 class RegisterRequest(BaseModel):
-    device_token: str
+    push_id: str
+    push_secret: str
     relay_url: str
-    relay_token: str
+    notifier_secret: str
     truenas_host: str
     truenas_port: int = 443
     truenas_api_key: str
-    verify_tls: bool = False
-    poll_interval: int = 900
+    verify_tls: bool = True
+    poll_interval: int = 600
 
 
 @app.post("/api/register", status_code=200)
-async def register(req: RegisterRequest):
+async def register(
+    req: RegisterRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    existing = cfg_module.load()
+    # First-time: Bearer must match the notifier_secret in the body.
+    # Re-registration: Bearer must match the stored notifier_secret.
+    expected = existing.notifier_secret if existing else req.notifier_secret
+    _require_auth(authorization, expected)
+
     conf = cfg_module.Config(**req.model_dump())
     cfg_module.save(conf)
-    log.info(f"Device registered: ...{req.device_token[-6:]}")
-    # Kick off an immediate check in the background.
+    log.info(f"Device registered with push_id: ...{req.push_id[-6:]}")
     asyncio.create_task(notifier.check_and_notify())
     return {"status": "registered"}
 
 
 @app.get("/api/status")
-async def status():
+async def status(authorization: Optional[str] = Header(default=None)):
     conf = cfg_module.load()
+    if conf is None:
+        raise HTTPException(status_code=404, detail="Not registered")
+    _require_auth(authorization, conf.notifier_secret)
     return {
-        "registered": conf is not None,
+        "registered": True,
         "last_check": _last_check.isoformat() if _last_check else None,
         "version": "1.0.0",
     }
 
 
 @app.delete("/api/unregister", status_code=200)
-async def unregister():
+async def unregister(authorization: Optional[str] = Header(default=None)):
+    conf = cfg_module.load()
+    if conf is None:
+        raise HTTPException(status_code=404, detail="Not registered")
+    _require_auth(authorization, conf.notifier_secret)
     cfg_module.delete()
     log.info("Device unregistered")
     return {"status": "unregistered"}
