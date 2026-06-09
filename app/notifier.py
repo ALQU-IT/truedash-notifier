@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 import apns
@@ -9,8 +10,16 @@ log = logging.getLogger(__name__)
 # In-memory state for deduplication — mirrors iOS NotificationManager thresholds.
 _state: dict = {}
 
+# Serializes checks: the poll loop and register-triggered checks share _state.
+_check_lock = asyncio.Lock()
+
 
 async def check_and_notify() -> None:
+    async with _check_lock:
+        await _check_and_notify()
+
+
+async def _check_and_notify() -> None:
     conf = cfg_module.load()
     if conf is None:
         log.debug("No config — skipping check")

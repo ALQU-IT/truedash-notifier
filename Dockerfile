@@ -7,6 +7,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ .
 
+RUN useradd --system --no-create-home notifier \
+    && mkdir -p /data \
+    && chown notifier:notifier /data
+USER notifier
+
 VOLUME ["/data"]
 
 EXPOSE 7842

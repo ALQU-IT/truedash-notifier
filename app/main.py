@@ -1,5 +1,7 @@
 import asyncio
+import hmac
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
@@ -48,11 +50,20 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="TrueDash Notifier", version="1.0.0", lifespan=lifespan)
 
 
+# Optional bootstrap secret: if set, first-time registration requires it as
+# the Bearer token, closing the trust-on-first-use takeover window.
+BOOTSTRAP_SECRET = os.getenv("NOTIFIER_BOOTSTRAP_SECRET", "")
+
+# Minimum seconds between /api/test wakes.
+TEST_COOLDOWN = 30
+_last_test: Optional[datetime] = None
+
+
 def _require_auth(authorization: Optional[str], expected_secret: str) -> None:
-    token = None
+    token = ""
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:]
-    if not token or token != expected_secret:
+    if not token or not hmac.compare_digest(token, expected_secret):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -74,9 +85,15 @@ async def register(
     authorization: Optional[str] = Header(default=None),
 ):
     existing = cfg_module.load()
-    # First-time: Bearer must match the notifier_secret in the body.
     # Re-registration: Bearer must match the stored notifier_secret.
-    expected = existing.notifier_secret if existing else req.notifier_secret
+    # First-time: Bearer must match NOTIFIER_BOOTSTRAP_SECRET if deployed with
+    # one, otherwise the notifier_secret in the body (trust on first use).
+    if existing:
+        expected = existing.notifier_secret
+    elif BOOTSTRAP_SECRET:
+        expected = BOOTSTRAP_SECRET
+    else:
+        expected = req.notifier_secret
     _require_auth(authorization, expected)
 
     conf = cfg_module.Config(**req.model_dump())
@@ -112,10 +129,15 @@ async def unregister(authorization: Optional[str] = Header(default=None)):
 
 @app.post("/api/test", status_code=200)
 async def test_wake(authorization: Optional[str] = Header(default=None)):
+    global _last_test
     conf = cfg_module.load()
     if conf is None:
         raise HTTPException(status_code=404, detail="Not registered")
     _require_auth(authorization, conf.notifier_secret)
+    now = datetime.now(timezone.utc)
+    if _last_test and (now - _last_test).total_seconds() < TEST_COOLDOWN:
+        raise HTTPException(status_code=429, detail="Test cooldown active")
+    _last_test = now
     ok = await notifier_apns.wake(conf.push_id, conf.relay_url, conf.push_secret)
     if not ok:
         raise HTTPException(status_code=502, detail="Relay wake failed")

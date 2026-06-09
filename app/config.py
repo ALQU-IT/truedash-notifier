@@ -1,7 +1,11 @@
+import logging
 import os
+import tempfile
 from pathlib import Path
 from typing import Optional
 from pydantic import BaseModel, Field, field_validator
+
+log = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(os.getenv("CONFIG_PATH", "/data/config.json"))
 
@@ -30,14 +34,24 @@ def load() -> Optional[Config]:
         return None
     try:
         return Config.model_validate_json(CONFIG_PATH.read_text())
-    except Exception:
+    except Exception as e:
+        log.warning(f"Config file exists but could not be loaded: {e}")
         return None
 
 
 def save(cfg: Config) -> None:
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(cfg.model_dump_json(indent=2))
-    CONFIG_PATH.chmod(0o600)
+    # Atomic write: temp file created 0o600, then renamed over the target,
+    # so secrets are never world-readable and a crash can't corrupt the config.
+    fd, tmp_path = tempfile.mkstemp(dir=CONFIG_PATH.parent, suffix=".tmp")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(cfg.model_dump_json(indent=2))
+        os.replace(tmp_path, CONFIG_PATH)
+    except BaseException:
+        os.unlink(tmp_path)
+        raise
 
 
 def delete() -> None:
