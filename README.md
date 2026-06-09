@@ -27,24 +27,17 @@ The app polls the local TrueNAS API. When an alert is detected, it sends a wake 
 
 ## Installation
 
-### Recommended: TrueDash iOS app
-
-The easiest way to install and configure TrueDash Notifier is through the TrueDash iOS app:
-
-1. Go to **Settings → Notifications**
-2. Tap **Install Notifier on TrueNAS**
-3. The app registers with the relay, deploys the TrueNAS app, and configures everything automatically
-
-### TrueNAS Apps (manual)
+### TrueNAS Apps (recommended)
 
 1. In the TrueNAS SCALE web UI, go to **Apps**
 2. Click **Discover Apps** → **Custom App**
 3. Set the image to `ghcr.io/alqu-it/truedash-notifier` and tag `latest`
-4. Set the container port to **7842** and expose it on the host
+4. Set the container port to **7842** (TCP) and expose it on the host
 5. Add a host path or ix-volume mounted at `/data` for persistent config storage
-6. Save and start the app
+6. Optionally set the `NOTIFIER_BOOTSTRAP_SECRET` environment variable (see [Bootstrap secret](#bootstrap-secret-recommended))
+7. Save and start the app
 
-Then register it from the TrueDash iOS app, or manually via the API (see below).
+Then connect from the TrueDash iOS app via **Settings → Notifications → Connect to Notifier**, or register manually via the API (see below).
 
 ### Manual Docker install
 
@@ -90,7 +83,7 @@ docker run -d \
 
 (In the TrueNAS Apps UI, add it under **Environment Variables**.)
 
-When set, the first registration must send `Authorization: Bearer <bootstrap-secret>`. After registration, all endpoints use the `notifier_secret` chosen during registration. Generate a secret with e.g. `openssl rand -hex 32`.
+When set, the first registration must send `Authorization: Bearer <bootstrap-secret>` — enter the same secret in the TrueDash iOS app when connecting to the notifier. After registration, all endpoints use the `notifier_secret` chosen during registration. Generate a secret with e.g. `openssl rand -hex 32`.
 
 ## API
 
