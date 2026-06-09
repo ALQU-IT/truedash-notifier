@@ -74,9 +74,27 @@ curl -X POST http://<truenas-ip>:7842/api/register \
   }'
 ```
 
+### Bootstrap secret (recommended)
+
+By default, the first `POST /api/register` is trust-on-first-use: whoever reaches the port first claims the notifier. To close this window, set the `NOTIFIER_BOOTSTRAP_SECRET` environment variable when deploying the container:
+
+```bash
+docker run -d \
+  --name truedash-notifier \
+  --restart unless-stopped \
+  -p 7842:7842 \
+  -v truedash-notifier-data:/data \
+  -e NOTIFIER_BOOTSTRAP_SECRET=<strong-random-secret> \
+  ghcr.io/alqu-it/truedash-notifier:latest
+```
+
+(In the TrueNAS Apps UI, add it under **Environment Variables**.)
+
+When set, the first registration must send `Authorization: Bearer <bootstrap-secret>`. After registration, all endpoints use the `notifier_secret` chosen during registration. Generate a secret with e.g. `openssl rand -hex 32`.
+
 ## API
 
-All endpoints require `Authorization: Bearer <notifier_secret>`. On first registration, the Bearer must match the `notifier_secret` field in the request body.
+All endpoints require `Authorization: Bearer <notifier_secret>`. On first registration, the Bearer must match `NOTIFIER_BOOTSTRAP_SECRET` if the container was deployed with one, otherwise the `notifier_secret` field in the request body.
 
 | Method | Path | Description |
 |---|---|---|
