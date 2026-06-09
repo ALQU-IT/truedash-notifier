@@ -7,6 +7,7 @@ from typing import Optional
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
+import apns as notifier_apns
 import config as cfg_module
 import notifier
 
@@ -107,6 +108,19 @@ async def unregister(authorization: Optional[str] = Header(default=None)):
     cfg_module.delete()
     log.info("Device unregistered")
     return {"status": "unregistered"}
+
+
+@app.post("/api/test", status_code=200)
+async def test_wake(authorization: Optional[str] = Header(default=None)):
+    conf = cfg_module.load()
+    if conf is None:
+        raise HTTPException(status_code=404, detail="Not registered")
+    _require_auth(authorization, conf.notifier_secret)
+    ok = await notifier_apns.wake(conf.push_id, conf.relay_url, conf.push_secret)
+    if not ok:
+        raise HTTPException(status_code=502, detail="Relay wake failed")
+    log.info("Test wake sent to relay")
+    return {"status": "ok"}
 
 
 @app.get("/health")

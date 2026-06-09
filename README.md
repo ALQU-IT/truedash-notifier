@@ -1,6 +1,6 @@
 # TrueDash Notifier
 
-A lightweight Docker container that runs on your TrueNAS SCALE server and delivers push notifications to the TrueDash iOS app — even when your iPhone hasn't opened the app in days.
+A lightweight app for TrueNAS SCALE that delivers push notifications to the TrueDash iOS app — even when your iPhone hasn't opened the app in days.
 
 ## What it does
 
@@ -16,7 +16,7 @@ Polls your TrueNAS server every 10 minutes and sends a push notification when:
 TrueNAS REST API → TrueDash Notifier → truedash-relay.alqu.ch → APNs → iPhone
 ```
 
-The container polls the local TrueNAS API. When an alert is detected, it sends a wake signal to the relay using an opaque `push_id`. The relay resolves the device token internally and forwards the push to Apple — the device token never leaves the relay.
+The app polls the local TrueNAS API. When an alert is detected, it sends a wake signal to the relay using an opaque `push_id`. The relay resolves the device token internally and forwards the push to Apple — the device token never leaves the relay.
 
 ### Privacy architecture
 
@@ -25,19 +25,28 @@ The container polls the local TrueNAS API. When an alert is detected, it sends a
 - Wake calls contain only the `push_id` — no PII passes through the Notifier or its logs
 - Each device has its own secret, independently revokable
 
-## Setup
+## Installation
 
-### 1. Install via TrueDash
+### Recommended: TrueDash iOS app
 
-In the TrueDash app:
+The easiest way to install and configure TrueDash Notifier is through the TrueDash iOS app:
 
 1. Go to **Settings → Notifications**
 2. Tap **Install Notifier on TrueNAS**
-3. The app registers with the relay, then deploys and configures the container automatically
+3. The app registers with the relay, deploys the TrueNAS app, and configures everything automatically
 
-Or manually via **Settings → Notifications → Install Manually** if the automatic install isn't available for your TrueNAS version.
+### TrueNAS Apps (manual)
 
-### 2. Manual Docker install (advanced)
+1. In the TrueNAS SCALE web UI, go to **Apps**
+2. Click **Discover Apps** → **Custom App**
+3. Set the image to `ghcr.io/alqu-it/truedash-notifier` and tag `latest`
+4. Set the container port to **7842** and expose it on the host
+5. Add a host path or ix-volume mounted at `/data` for persistent config storage
+6. Save and start the app
+
+Then register it from the TrueDash iOS app, or manually via the API (see below).
+
+### Manual Docker install
 
 ```bash
 docker run -d \
@@ -53,6 +62,7 @@ Then register (the `push_id` and `push_secret` come from the relay registration 
 ```bash
 curl -X POST http://<truenas-ip>:7842/api/register \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <notifier_secret>" \
   -d '{
     "push_id": "<uuid-from-relay>",
     "push_secret": "<per-device-secret-from-relay>",
@@ -66,21 +76,21 @@ curl -X POST http://<truenas-ip>:7842/api/register \
 
 ## API
 
-All endpoints except `/health` and the initial `POST /api/register` require `Authorization: Bearer <notifier_secret>`.
+All endpoints require `Authorization: Bearer <notifier_secret>`. On first registration, the Bearer must match the `notifier_secret` field in the request body.
 
-| Method | Path | Auth required | Description |
-|---|---|---|---|
-| `POST` | `/api/register` | Only if already registered | Register device + TrueNAS credentials |
-| `GET` | `/api/status` | Yes | Registration status and last check time |
-| `DELETE` | `/api/unregister` | Yes | Remove registration and credentials |
-| `GET` | `/health` | No | Container health check |
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/register` | Register device + TrueNAS credentials |
+| `GET` | `/api/status` | Registration status and last check time |
+| `DELETE` | `/api/unregister` | Remove registration and credentials |
+| `GET` | `/health` | Health check (no auth) |
 
 ## Configuration
 
 | Field | Default | Description |
 |---|---|---|
 | `poll_interval` | `600` | Seconds between checks (min 60) |
-| `verify_tls` | `true` | Verify TrueNAS TLS certificate (set to false for self-signed certs) |
+| `verify_tls` | `true` | Verify TrueNAS TLS certificate (set to `false` for self-signed certs) |
 
 ## Requirements
 
@@ -90,7 +100,7 @@ All endpoints except `/health` and the initial `POST /api/register` require `Aut
 
 ## Security
 
-- Config is stored in a Docker volume (`/data/config.json`) with `600` permissions — readable only by the container process
+- Config is stored at `/data/config.json` with `600` permissions — readable only by the container process
 - The Notifier never sees or logs the APNs device token — only the opaque `push_id`
 - The relay holds device tokens; the Notifier holds only UUIDs
 - Each device authenticates to the relay with its own per-device secret
