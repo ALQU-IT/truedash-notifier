@@ -49,11 +49,10 @@ async def _check_and_notify() -> None:
         except Exception:
             pass
 
-    triggered = (
-        _check_pool_space(pools_raw)
-        or _check_pool_health(pools_raw)
-        or _check_app_updates(apps_raw)
-    )
+    space_triggered = _check_pool_space(pools_raw)
+    health_triggered = _check_pool_health(pools_raw)
+    updates_triggered = _check_app_updates(apps_raw)
+    triggered = space_triggered or health_triggered or updates_triggered
 
     if triggered:
         ok = await apns.wake(conf.push_id, conf.relay_url, conf.push_secret)
