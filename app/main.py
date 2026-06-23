@@ -7,7 +7,7 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 import apns as notifier_apns
 import certgen
@@ -77,32 +77,48 @@ def _require_auth(authorization: Optional[str], expected_secret: str) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-async def _validate_enrollment_token(relay_url: str, token: str) -> None:
-    """Calls the relay to validate and consume a single-use enrollment token."""
-    url = relay_url.rstrip("/") + "/validate-enrollment"
+async def _verify_enrollment(relay_url: str, token: str) -> tuple[str, str]:
+    """Calls the relay to verify and consume a single-use enrollment token.
+    The relay vouches for the device and returns its push_id + push_secret,
+    so those credentials never traverse the app→notifier link."""
+    url = relay_url.rstrip("/") + "/enrollment/verify"
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(url, json={"enrollment_token": token})
-        if resp.status_code != 200 or not resp.json().get("valid"):
-            raise HTTPException(status_code=401, detail="Invalid or expired enrollment token")
-    except HTTPException:
-        raise
     except Exception as e:
-        log.error(f"Enrollment token validation failed: {type(e).__name__}")
-        raise HTTPException(status_code=502, detail="Could not reach relay to validate enrollment token")
+        log.error(f"Enrollment verify failed: {type(e).__name__}")
+        raise HTTPException(status_code=502, detail="Could not reach relay to verify enrollment token")
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid or expired enrollment token")
+
+    data = resp.json()
+    push_id = data.get("push_id")
+    push_secret = data.get("push_secret")
+    if not push_id or not push_secret:
+        raise HTTPException(status_code=502, detail="Relay did not return push_id and push_secret")
+    return push_id, push_secret
 
 
 class RegisterRequest(BaseModel):
-    push_id: str
-    push_secret: str
     relay_url: str
     notifier_secret: str
     truenas_host: str
-    truenas_port: int = 443
     truenas_api_key: str
+    truenas_port: int = 443
     verify_tls: bool = False
     poll_interval: int = 600
-    enrollment_token: Optional[str] = None  # single-use relay-minted token
+    # Either supply an enrollment_token (relay returns push_id + push_secret),
+    # or supply push_id + push_secret directly (legacy path).
+    enrollment_token: Optional[str] = None
+    push_id: Optional[str] = None
+    push_secret: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _credentials_present(self) -> "RegisterRequest":
+        if not self.enrollment_token and not (self.push_id and self.push_secret):
+            raise ValueError("either enrollment_token or push_id+push_secret is required")
+        return self
 
 
 @app.post("/api/register", status_code=200)
@@ -114,14 +130,26 @@ async def register(
     expected = existing.notifier_secret if existing else req.notifier_secret
     _require_auth(authorization, expected)
 
-    # If the relay minted an enrollment token, validate and consume it.
+    # If the relay minted an enrollment token, exchange it for the device's
+    # push credentials; otherwise use the ones supplied directly in the body.
     if req.enrollment_token:
-        await _validate_enrollment_token(req.relay_url, req.enrollment_token)
+        push_id, push_secret = await _verify_enrollment(req.relay_url, req.enrollment_token)
+    else:
+        push_id, push_secret = req.push_id, req.push_secret
 
-    conf = cfg_module.Config(**{k: v for k, v in req.model_dump().items()
-                                if k != "enrollment_token"})
+    conf = cfg_module.Config(
+        push_id=push_id,
+        push_secret=push_secret,
+        relay_url=req.relay_url,
+        notifier_secret=req.notifier_secret,
+        truenas_host=req.truenas_host,
+        truenas_port=req.truenas_port,
+        truenas_api_key=req.truenas_api_key,
+        verify_tls=req.verify_tls,
+        poll_interval=req.poll_interval,
+    )
     cfg_module.save(conf)
-    log.info(f"Device registered with push_id: ...{req.push_id[-6:]}")
+    log.info(f"Device registered with push_id: ...{push_id[-6:]}")
     asyncio.create_task(notifier.check_and_notify())
     return {"status": "registered"}
 
