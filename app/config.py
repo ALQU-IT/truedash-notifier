@@ -18,7 +18,7 @@ class Config(BaseModel):
     truenas_host: str
     truenas_port: int = 443
     truenas_api_key: str
-    verify_tls: bool = True
+    verify_tls: bool = False
     poll_interval: int = Field(default=600, ge=60)
 
     @field_validator("relay_url")
