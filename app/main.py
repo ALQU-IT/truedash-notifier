@@ -127,14 +127,22 @@ async def register(
     authorization: Optional[str] = Header(default=None),
 ):
     existing = cfg_module.load()
-    expected = existing.notifier_secret if existing else req.notifier_secret
-    _require_auth(authorization, expected)
 
-    # If the relay minted an enrollment token, exchange it for the device's
-    # push credentials; otherwise use the ones supplied directly in the body.
+    # Auth model depends on how the device proves itself:
+    #  - enrollment_token: the relay vouches for the device by verifying the
+    #    single-use token, so that IS the proof of authenticity. Re-enrollment
+    #    must stay idempotent — an app reinstall carries a fresh notifier_secret,
+    #    so gating on the old stored one would wrongly 401 (TD-N7). Redeeming
+    #    the token below is the gate instead.
+    #  - legacy push_id/push_secret: no relay round-trip, so fall back to the
+    #    stored notifier_secret to authenticate the caller.
     if req.enrollment_token:
+        # Redeem the single-use token exactly once; on failure the app must
+        # request a fresh enrollment rather than retrying this dead token.
         push_id, push_secret = await _verify_enrollment(req.relay_url, req.enrollment_token)
     else:
+        expected = existing.notifier_secret if existing else req.notifier_secret
+        _require_auth(authorization, expected)
         push_id, push_secret = req.push_id, req.push_secret
 
     conf = cfg_module.Config(
@@ -149,6 +157,9 @@ async def register(
         poll_interval=req.poll_interval,
     )
     cfg_module.save(conf)
+    # Fresh credentials stored — clear any stale-credential flag from a prior
+    # rotation so the poll loop and /api/status reflect the healed state.
+    notifier.clear_credentials_stale()
     log.info(f"Device registered with push_id: ...{push_id[-6:]}")
     asyncio.create_task(notifier.check_and_notify())
     return {"status": "registered"}
@@ -163,6 +174,9 @@ async def status(authorization: Optional[str] = Header(default=None)):
     return {
         "registered": True,
         "last_check": _last_check.isoformat() if _last_check else None,
+        # True after the relay rotated our credentials (app reinstall): the app
+        # should re-enroll by POSTing /api/register with a fresh enrollment_token.
+        "credentials_stale": notifier.credentials_stale(),
         "version": "1.0.0",
     }
 
@@ -189,8 +203,14 @@ async def test_wake(authorization: Optional[str] = Header(default=None)):
     if _last_test and (now - _last_test).total_seconds() < TEST_COOLDOWN:
         raise HTTPException(status_code=429, detail="Test cooldown active")
     _last_test = now
-    ok = await notifier_apns.wake(conf.push_id, conf.relay_url, conf.push_secret)
-    if not ok:
+    result = await notifier_apns.wake(conf.push_id, conf.relay_url, conf.push_secret)
+    if result == notifier_apns.UNAUTHORIZED:
+        notifier.mark_credentials_stale()
+        raise HTTPException(
+            status_code=401,
+            detail="Credentials rotated — re-enroll with a fresh enrollment_token",
+        )
+    if result != notifier_apns.OK:
         raise HTTPException(status_code=502, detail="Relay wake failed")
     log.info("Test wake sent to relay")
     return {"status": "ok"}

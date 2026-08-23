@@ -13,6 +13,24 @@ _state: dict = {}
 # Serializes checks: the poll loop and register-triggered checks share _state.
 _check_lock = asyncio.Lock()
 
+# Set when the relay rejects our push credentials (app reinstall rotated them).
+# Surfaced via /api/status so the app knows to re-enroll with a fresh token.
+_credentials_stale = False
+
+
+def credentials_stale() -> bool:
+    return _credentials_stale
+
+
+def mark_credentials_stale() -> None:
+    global _credentials_stale
+    _credentials_stale = True
+
+
+def clear_credentials_stale() -> None:
+    global _credentials_stale
+    _credentials_stale = False
+
 
 async def check_and_notify() -> None:
     async with _check_lock:
@@ -55,9 +73,13 @@ async def _check_and_notify() -> None:
     triggered = space_triggered or health_triggered or updates_triggered
 
     if triggered:
-        ok = await apns.wake(conf.push_id, conf.relay_url, conf.push_secret)
-        if ok:
+        result = await apns.wake(conf.push_id, conf.relay_url, conf.push_secret)
+        if result == apns.OK:
             log.info("Wake sent to relay")
+        elif result == apns.UNAUTHORIZED:
+            # Credentials rotated by the relay — flag for re-enrollment.
+            mark_credentials_stale()
+            log.warning("Wake unauthorized — awaiting re-enrollment from app")
         else:
             log.warning("Wake delivery failed")
 
