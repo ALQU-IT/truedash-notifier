@@ -107,7 +107,9 @@ class RegisterRequest(BaseModel):
     truenas_api_key: str
     truenas_port: int = 443
     verify_tls: bool = False
-    poll_interval: int = 600
+    # Notifier-owned setting: when omitted on re-registration the existing
+    # value is preserved rather than reset, so the app need not resend it.
+    poll_interval: Optional[int] = None
     # Either supply an enrollment_token (relay returns push_id + push_secret),
     # or supply push_id + push_secret directly (legacy path).
     enrollment_token: Optional[str] = None
@@ -145,6 +147,14 @@ async def register(
         _require_auth(authorization, expected)
         push_id, push_secret = req.push_id, req.push_secret
 
+    # Preserve a previously customized poll_interval when the app omits it.
+    if req.poll_interval is not None:
+        poll_interval = req.poll_interval
+    elif existing is not None:
+        poll_interval = existing.poll_interval
+    else:
+        poll_interval = 600
+
     conf = cfg_module.Config(
         push_id=push_id,
         push_secret=push_secret,
@@ -154,7 +164,7 @@ async def register(
         truenas_port=req.truenas_port,
         truenas_api_key=req.truenas_api_key,
         verify_tls=req.verify_tls,
-        poll_interval=req.poll_interval,
+        poll_interval=poll_interval,
     )
     cfg_module.save(conf)
     # Fresh credentials stored — clear any stale-credential flag from a prior
