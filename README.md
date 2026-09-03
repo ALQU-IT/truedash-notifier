@@ -13,7 +13,7 @@ Polls your TrueNAS server every 10 minutes and sends a push notification when:
 ## How it works
 
 ```
-TrueNAS REST API → TrueDash Notifier → truedash-relay.alqu.ch → APNs → iPhone
+TrueNAS middleware (JSON-RPC over WebSocket) → TrueDash Notifier → truedash-relay.alqu.ch → APNs → iPhone
 ```
 
 The app polls the local TrueNAS API. When an alert is detected, it sends a wake signal to the relay using an opaque `push_id`. The relay resolves the device token internally and forwards the push to Apple — the device token never leaves the relay.

@@ -44,28 +44,25 @@ async def _check_and_notify() -> None:
         return
 
     try:
-        pools_raw = await truenas.get_pools(
+        # One socket, authenticated once, reused for every query this cycle.
+        async with truenas.connect(
             conf.truenas_host, conf.truenas_port, conf.truenas_api_key, conf.verify_tls
-        )
-        apps_raw = await truenas.get_apps(
-            conf.truenas_host, conf.truenas_port, conf.truenas_api_key, conf.verify_tls
-        )
+        ) as tn:
+            pools_raw = await tn.pools()
+            apps_raw = await tn.apps()
+
+            # Enrich pools with logical dataset space.
+            for pool in pools_raw:
+                try:
+                    ds = await tn.dataset(pool["name"])
+                    if ds:
+                        pool["_used"] = ds["used"]["parsed"]
+                        pool["_avail"] = ds["available"]["parsed"]
+                except Exception:
+                    pass
     except Exception as e:
         log.warning(f"TrueNAS fetch failed: {e}")
         return
-
-    # Enrich pools with logical dataset space.
-    for pool in pools_raw:
-        try:
-            ds = await truenas.get_dataset(
-                conf.truenas_host, conf.truenas_port, conf.truenas_api_key,
-                pool["name"], conf.verify_tls,
-            )
-            if ds:
-                pool["_used"] = ds["used"]["parsed"]
-                pool["_avail"] = ds["available"]["parsed"]
-        except Exception:
-            pass
 
     space_triggered = _check_pool_space(pools_raw)
     health_triggered = _check_pool_health(pools_raw)
