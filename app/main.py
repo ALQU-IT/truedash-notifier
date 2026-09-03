@@ -62,7 +62,7 @@ async def lifespan(app: FastAPI):
         _poll_task.cancel()
 
 
-app = FastAPI(title="TrueDash Notifier", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="TrueDash Notifier", version="1.1.0", lifespan=lifespan)
 
 # Minimum seconds between /api/test wakes.
 TEST_COOLDOWN = 30
@@ -187,7 +187,7 @@ async def status(authorization: Optional[str] = Header(default=None)):
         # True after the relay rotated our credentials (app reinstall): the app
         # should re-enroll by POSTing /api/register with a fresh enrollment_token.
         "credentials_stale": notifier.credentials_stale(),
-        "version": "1.0.0",
+        "version": "1.1.0",
     }
 
 
