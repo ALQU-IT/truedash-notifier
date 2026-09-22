@@ -20,13 +20,11 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-_last_check: Optional[datetime] = None
 _poll_task:  Optional[asyncio.Task] = None
 _cert_fingerprint: Optional[str] = None
 
 
 async def _poll_loop() -> None:
-    global _last_check
     await asyncio.sleep(10)
     while True:
         conf = cfg_module.load()
@@ -34,7 +32,6 @@ async def _poll_loop() -> None:
         log.info("Running scheduled check")
         try:
             await notifier.check_and_notify()
-            _last_check = datetime.now(timezone.utc)
         except Exception as e:
             log.error(f"Unexpected error during check: {e}")
         await asyncio.sleep(interval)
@@ -43,6 +40,9 @@ async def _poll_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _poll_task, _cert_fingerprint
+
+    # Restore persisted dedup state so a restart doesn't replay standing alerts.
+    notifier.load_state()
 
     # Generate TLS cert if not present and compute fingerprint for /health.
     cert_path, _ = certgen.ensure_cert()
@@ -183,10 +183,13 @@ async def status(authorization: Optional[str] = Header(default=None)):
     _require_auth(authorization, conf.notifier_secret)
     return {
         "registered": True,
-        "last_check": _last_check.isoformat() if _last_check else None,
         # True after the relay rotated our credentials (app reinstall): the app
         # should re-enroll by POSTing /api/register with a fresh enrollment_token.
         "credentials_stale": notifier.credentials_stale(),
+        # Diagnostics: when the last poll ran, whether it reached TrueNAS, and
+        # the last error text — so "why did notifications stop?" is answerable
+        # from the app without reading container logs.
+        **notifier.status_info(),
         "version": "1.1.0",
     }
 
