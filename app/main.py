@@ -63,7 +63,7 @@ async def lifespan(app: FastAPI):
         _poll_task.cancel()
 
 
-app = FastAPI(title="TrueDash Notifier", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="TrueDash Notifier", version="1.1.1", lifespan=lifespan)
 
 # The only relay we trust. The enrollment path skips notifier_secret auth and
 # relies on the relay vouching for the token, so the relay must NOT come from
@@ -212,7 +212,7 @@ async def status(authorization: Optional[str] = Header(default=None)):
         # the last error text — so "why did notifications stop?" is answerable
         # from the app without reading container logs.
         **notifier.status_info(),
-        "version": "1.1.0",
+        "version": "1.1.1",
     }
 
 
