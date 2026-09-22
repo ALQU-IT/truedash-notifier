@@ -69,6 +69,13 @@ def _save_state() -> None:
         log.warning(f"Could not persist state: {e}")
 
 
+def reset_state() -> None:
+    _persist["dedup"] = {}
+    _persist["app_updates"] = []
+    _persist["credentials_stale"] = False
+    STATE_PATH.unlink(missing_ok=True)
+
+
 def credentials_stale() -> bool:
     return bool(_persist.get("credentials_stale"))
 

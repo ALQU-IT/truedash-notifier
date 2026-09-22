@@ -1,13 +1,14 @@
 import asyncio
 import hmac
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 import apns as notifier_apns
 import certgen
@@ -64,6 +65,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="TrueDash Notifier", version="1.1.0", lifespan=lifespan)
 
+# The only relay we trust. The enrollment path skips notifier_secret auth and
+# relies on the relay vouching for the token, so the relay must NOT come from
+# the request body — otherwise anyone on the LAN could point verification at
+# their own server and take over the notifier's config.
+TRUSTED_RELAY_URL = os.getenv("RELAY_URL", "https://truedash-relay.alqu.ch").rstrip("/")
+
+# Strong refs to fire-and-forget tasks so they aren't garbage-collected mid-run.
+_background_tasks: set = set()
+
 # Minimum seconds between /api/test wakes.
 TEST_COOLDOWN = 30
 _last_test: Optional[datetime] = None
@@ -92,7 +102,12 @@ async def _verify_enrollment(relay_url: str, token: str) -> tuple[str, str]:
     if resp.status_code != 200:
         raise HTTPException(status_code=401, detail="Invalid or expired enrollment token")
 
-    data = resp.json()
+    try:
+        data = resp.json()
+    except ValueError:
+        raise HTTPException(status_code=502, detail="Relay returned a malformed response")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail="Relay returned a malformed response")
     push_id = data.get("push_id")
     push_secret = data.get("push_secret")
     if not push_id or not push_secret:
@@ -109,7 +124,7 @@ class RegisterRequest(BaseModel):
     verify_tls: bool = False
     # Notifier-owned setting: when omitted on re-registration the existing
     # value is preserved rather than reset, so the app need not resend it.
-    poll_interval: Optional[int] = None
+    poll_interval: Optional[int] = Field(default=None, ge=60)
     # Either supply an enrollment_token (relay returns push_id + push_secret),
     # or supply push_id + push_secret directly (legacy path).
     enrollment_token: Optional[str] = None
@@ -130,6 +145,11 @@ async def register(
 ):
     existing = cfg_module.load()
 
+    # Validate before redeeming the single-use token, so a bad request can't
+    # burn it.
+    if req.relay_url.rstrip("/") != TRUSTED_RELAY_URL:
+        raise HTTPException(status_code=400, detail="Untrusted relay_url")
+
     # Auth model depends on how the device proves itself:
     #  - enrollment_token: the relay vouches for the device by verifying the
     #    single-use token, so that IS the proof of authenticity. Re-enrollment
@@ -141,7 +161,7 @@ async def register(
     if req.enrollment_token:
         # Redeem the single-use token exactly once; on failure the app must
         # request a fresh enrollment rather than retrying this dead token.
-        push_id, push_secret = await _verify_enrollment(req.relay_url, req.enrollment_token)
+        push_id, push_secret = await _verify_enrollment(TRUSTED_RELAY_URL, req.enrollment_token)
     else:
         expected = existing.notifier_secret if existing else req.notifier_secret
         _require_auth(authorization, expected)
@@ -158,7 +178,7 @@ async def register(
     conf = cfg_module.Config(
         push_id=push_id,
         push_secret=push_secret,
-        relay_url=req.relay_url,
+        relay_url=TRUSTED_RELAY_URL,
         notifier_secret=req.notifier_secret,
         truenas_host=req.truenas_host,
         truenas_port=req.truenas_port,
@@ -171,7 +191,9 @@ async def register(
     # rotation so the poll loop and /api/status reflect the healed state.
     notifier.clear_credentials_stale()
     log.info(f"Device registered with push_id: ...{push_id[-6:]}")
-    asyncio.create_task(notifier.check_and_notify())
+    task = asyncio.create_task(notifier.check_and_notify())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     return {"status": "registered"}
 
 
@@ -201,6 +223,8 @@ async def unregister(authorization: Optional[str] = Header(default=None)):
         raise HTTPException(status_code=404, detail="Not registered")
     _require_auth(authorization, conf.notifier_secret)
     cfg_module.delete()
+    # Drop persisted alert state too, so a later registration starts clean.
+    notifier.reset_state()
     log.info("Device unregistered")
     return {"status": "unregistered"}
 
