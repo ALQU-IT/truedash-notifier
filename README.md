@@ -2,6 +2,8 @@
 
 A lightweight app for TrueNAS SCALE that delivers push notifications to the TrueDash iOS app — even when your iPhone hasn't opened the app in days.
 
+[Here to the app](https://apps.apple.com/ch/app/truedash/id6778523884)
+
 ## What it does
 
 Polls your TrueNAS server every 10 minutes and sends a push notification when:
