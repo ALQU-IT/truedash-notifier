@@ -63,7 +63,9 @@ async def lifespan(app: FastAPI):
         _poll_task.cancel()
 
 
-app = FastAPI(title="TrueDash Notifier", version="1.1.2", lifespan=lifespan)
+VERSION = "1.2.0"
+
+app = FastAPI(title="TrueDash Notifier", version=VERSION, lifespan=lifespan)
 
 # The only relay we trust. The enrollment path skips notifier_secret auth and
 # relies on the relay vouching for the token, so the relay must NOT come from
@@ -74,9 +76,9 @@ TRUSTED_RELAY_URL = os.getenv("RELAY_URL", "https://truedash-relay.alqu.ch").rst
 # Strong refs to fire-and-forget tasks so they aren't garbage-collected mid-run.
 _background_tasks: set = set()
 
-# Minimum seconds between /api/test wakes.
+# Minimum seconds between /api/test wakes, per phone (keyed by push_id).
 TEST_COOLDOWN = 30
-_last_test: Optional[datetime] = None
+_last_test: dict[str, datetime] = {}
 
 
 def _require_auth(authorization: Optional[str], expected_secret: str) -> None:
@@ -87,7 +89,7 @@ def _require_auth(authorization: Optional[str], expected_secret: str) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-async def _verify_enrollment(relay_url: str, token: str) -> tuple[str, str]:
+async def _verify_enrollment(relay_url: str, token: str) -> tuple[str, str, Optional[str]]:
     """Calls the relay to verify and consume a single-use enrollment token.
     The relay vouches for the device and returns its push_id + push_secret,
     so those credentials never traverse the app→notifier link."""
@@ -117,7 +119,9 @@ async def _verify_enrollment(relay_url: str, token: str) -> tuple[str, str]:
     push_secret = data.get("push_secret")
     if not push_id or not push_secret:
         raise HTTPException(status_code=502, detail="Relay did not return push_id and push_secret")
-    return push_id, push_secret
+    # Relays before 2.3.0 don't send it.
+    device_id = data.get("device_id")
+    return push_id, push_secret, device_id if isinstance(device_id, str) and device_id else None
 
 
 class RegisterRequest(BaseModel):
@@ -143,12 +147,30 @@ class RegisterRequest(BaseModel):
         return self
 
 
+def _bearer(authorization: Optional[str]) -> str:
+    if authorization and authorization.lower().startswith("bearer "):
+        return authorization[7:]
+    return ""
+
+
+def _require_device(authorization: Optional[str]) -> tuple[cfg_module.Config, cfg_module.Device]:
+    """The config and the phone this request's Bearer secret belongs to."""
+    conf = cfg_module.load()
+    if conf is None or not conf.devices:
+        raise HTTPException(status_code=404, detail="Not registered")
+    device = conf.device_for_secret(_bearer(authorization))
+    if device is None:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return conf, device
+
+
 @app.post("/api/register", status_code=200)
 async def register(
     req: RegisterRequest,
     authorization: Optional[str] = Header(default=None),
 ):
     existing = cfg_module.load()
+    devices = list(existing.devices) if existing else []
 
     # Validate before redeeming the single-use token, so a bad request can't
     # burn it.
@@ -161,16 +183,48 @@ async def register(
     #    must stay idempotent — an app reinstall carries a fresh notifier_secret,
     #    so gating on the old stored one would wrongly 401 (TD-N7). Redeeming
     #    the token below is the gate instead.
-    #  - legacy push_id/push_secret: no relay round-trip, so fall back to the
+    #  - legacy push_id/push_secret: no relay round-trip, so fall back to a
     #    stored notifier_secret to authenticate the caller.
+    #
+    # Several phones can share one notifier (1.2.0). The phone being
+    # (re-)registered replaces only its own entry: matched by the relay's
+    # device_id, else by its notifier_secret.
+    device_id = None
     if req.enrollment_token:
         # Redeem the single-use token exactly once; on failure the app must
         # request a fresh enrollment rather than retrying this dead token.
-        push_id, push_secret = await _verify_enrollment(TRUSTED_RELAY_URL, req.enrollment_token)
+        push_id, push_secret, device_id = await _verify_enrollment(TRUSTED_RELAY_URL, req.enrollment_token)
+        if device_id:
+            # Entries without a device_id predate it (one phone per notifier,
+            # or an older relay), so the first phone with one takes them over,
+            # as before 1.2.0. Any other phone re-enrolls on its next connect.
+            same = lambda d: d.device_id in (device_id, None)
+        elif existing and existing.device_for_secret(req.notifier_secret):
+            same = lambda d: hmac.compare_digest(d.notifier_secret, req.notifier_secret)
+        else:
+            # An older relay can't say whether this is a new phone or a
+            # reinstalled one, so keep the pre-1.2.0 rule: it takes over.
+            same = lambda d: True
     else:
-        expected = existing.notifier_secret if existing else req.notifier_secret
-        _require_auth(authorization, expected)
+        if existing and existing.devices:
+            if existing.device_for_secret(_bearer(authorization)) is None:
+                raise HTTPException(status_code=401, detail="Unauthorized")
+        else:
+            _require_auth(authorization, req.notifier_secret)
         push_id, push_secret = req.push_id, req.push_secret
+        bearer = _bearer(authorization)
+        same = lambda d: hmac.compare_digest(d.notifier_secret, bearer)
+
+    replaced = [d for d in devices if same(d)]
+    devices = [d for d in devices if not same(d)]
+    devices.append(cfg_module.Device(
+        push_id=push_id,
+        push_secret=push_secret,
+        notifier_secret=req.notifier_secret,
+        device_id=device_id,
+    ))
+    dropped = devices[:-cfg_module.MAX_DEVICES]
+    devices = devices[-cfg_module.MAX_DEVICES:]
 
     # Preserve a previously customized poll_interval when the app omits it.
     if req.poll_interval is not None:
@@ -181,10 +235,8 @@ async def register(
         poll_interval = 600
 
     conf = cfg_module.Config(
-        push_id=push_id,
-        push_secret=push_secret,
+        devices=devices,
         relay_url=TRUSTED_RELAY_URL,
-        notifier_secret=req.notifier_secret,
         truenas_host=req.truenas_host,
         truenas_port=req.truenas_port,
         truenas_api_key=req.truenas_api_key,
@@ -192,62 +244,66 @@ async def register(
         poll_interval=poll_interval,
     )
     cfg_module.save(conf)
-    # Fresh credentials stored — clear any stale-credential flag from a prior
-    # rotation so the poll loop and /api/status reflect the healed state.
-    notifier.clear_credentials_stale()
-    log.info(f"Device registered with push_id: ...{push_id[-6:]}")
+    # A wake that failed for this phone's old credentials carries over, so the
+    # check below delivers it with the fresh ones.
+    if any(notifier.wake_pending(d.push_id) for d in replaced):
+        notifier.mark_wake_pending(push_id)
+    for d in replaced + dropped:
+        notifier.forget_device(d.push_id)
+    log.info(f"Device registered with push_id: ...{push_id[-6:]} ({len(devices)} device(s))")
     task = asyncio.create_task(notifier.check_and_notify())
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
-    return {"status": "registered"}
+    return {"status": "registered", "devices": len(devices)}
 
 
 @app.get("/api/status")
 async def status(authorization: Optional[str] = Header(default=None)):
-    conf = cfg_module.load()
-    if conf is None:
-        raise HTTPException(status_code=404, detail="Not registered")
-    _require_auth(authorization, conf.notifier_secret)
+    conf, device = _require_device(authorization)
     return {
         "registered": True,
-        # True after the relay rotated our credentials (app reinstall): the app
-        # should re-enroll by POSTing /api/register with a fresh enrollment_token.
-        "credentials_stale": notifier.credentials_stale(),
+        # True after the relay stopped accepting this phone's credentials (app
+        # reinstall, token retired): the app should re-enroll by POSTing
+        # /api/register with a fresh enrollment_token.
+        "credentials_stale": notifier.credentials_stale(device.push_id),
+        # How many phones this notifier wakes (1.2.0+).
+        "devices": len(conf.devices),
         # Diagnostics: when the last poll ran, whether it reached TrueNAS, and
         # the last error text — so "why did notifications stop?" is answerable
         # from the app without reading container logs.
         **notifier.status_info(),
-        "version": "1.1.2",
+        "version": VERSION,
     }
 
 
 @app.delete("/api/unregister", status_code=200)
 async def unregister(authorization: Optional[str] = Header(default=None)):
-    conf = cfg_module.load()
-    if conf is None:
-        raise HTTPException(status_code=404, detail="Not registered")
-    _require_auth(authorization, conf.notifier_secret)
-    cfg_module.delete()
-    # Drop persisted alert state too, so a later registration starts clean.
-    notifier.reset_state()
-    log.info("Device unregistered")
-    return {"status": "unregistered"}
+    conf, device = _require_device(authorization)
+    remaining = [d for d in conf.devices if d.push_id != device.push_id]
+    notifier.forget_device(device.push_id)
+    if remaining:
+        cfg_module.save(conf.model_copy(update={"devices": remaining}))
+        log.info(f"Device unregistered, {len(remaining)} device(s) remain")
+    else:
+        cfg_module.delete()
+        # Drop persisted alert state too, so a later registration starts clean.
+        notifier.reset_state()
+        log.info("Last device unregistered")
+    # The app deletes the notifier app only when no other phone still uses it.
+    return {"status": "unregistered", "remaining_devices": len(remaining)}
 
 
 @app.post("/api/test", status_code=200)
 async def test_wake(authorization: Optional[str] = Header(default=None)):
-    global _last_test
-    conf = cfg_module.load()
-    if conf is None:
-        raise HTTPException(status_code=404, detail="Not registered")
-    _require_auth(authorization, conf.notifier_secret)
+    conf, device = _require_device(authorization)
     now = datetime.now(timezone.utc)
-    if _last_test and (now - _last_test).total_seconds() < TEST_COOLDOWN:
+    last = _last_test.get(device.push_id)
+    if last and (now - last).total_seconds() < TEST_COOLDOWN:
         raise HTTPException(status_code=429, detail="Test cooldown active")
-    _last_test = now
-    result = await notifier_apns.wake(conf.push_id, conf.relay_url, conf.push_secret)
+    _last_test[device.push_id] = now
+    result = await notifier_apns.wake(device.push_id, conf.relay_url, device.push_secret)
     if result == notifier_apns.UNAUTHORIZED:
-        notifier.mark_credentials_stale()
+        notifier.mark_credentials_stale(device.push_id)
         raise HTTPException(
             status_code=401,
             detail="Credentials rotated — re-enroll with a fresh enrollment_token",
