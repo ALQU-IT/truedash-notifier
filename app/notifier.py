@@ -22,12 +22,15 @@ _check_lock = asyncio.Lock()
 #   dedup            per-pool space/health thresholds, so we alert on transitions
 #   app_updates      sorted identities of apps with an update pending
 #   credentials_stale True after the relay rotated our push credentials
+#   wake_pending     True when an alert's wake didn't reach the relay; retried
+#                    on every later check until one succeeds
 # Persisting means a routine container update no longer replays every standing
 # alert, and the re-enroll signal is not lost on restart.
 _persist: dict = {
     "dedup": {},
     "app_updates": [],
     "credentials_stale": False,
+    "wake_pending": False,
 }
 
 # Volatile diagnostics (reset on restart, surfaced via /api/status).
@@ -73,6 +76,7 @@ def reset_state() -> None:
     _persist["dedup"] = {}
     _persist["app_updates"] = []
     _persist["credentials_stale"] = False
+    _persist["wake_pending"] = False
     STATE_PATH.unlink(missing_ok=True)
 
 
@@ -147,15 +151,27 @@ async def _check_and_notify() -> None:
     # Persist the updated thresholds regardless of whether we wake.
     _save_state()
 
+    # A wake that failed earlier is retried: its alert is already recorded in
+    # dedup, so no later transition would ever trigger it again. The app reads
+    # the server's current state when the push lands, so a late wake is fine.
+    # While credentials are stale a retry can only fail; re-enrollment runs a
+    # check straight away, which sends it.
     triggered = space_triggered or health_triggered or updates_triggered
-    if triggered:
+    retry = _persist.get("wake_pending") and not credentials_stale()
+    if triggered or retry:
         result = await apns.wake(conf.push_id, conf.relay_url, conf.push_secret)
+        pending = result != apns.OK
+        if _persist.get("wake_pending") != pending:
+            _persist["wake_pending"] = pending
+            _save_state()
         if result == apns.OK:
             log.info("Wake sent to relay")
         elif result == apns.UNAUTHORIZED:
             # Credentials rotated by the relay — flag for re-enrollment.
             mark_credentials_stale()
             log.warning("Wake unauthorized — awaiting re-enrollment from app")
+        elif result == apns.RATE_LIMITED:
+            log.warning("Wake skipped — relay rate limit reached")
         else:
             log.warning("Wake delivery failed")
 

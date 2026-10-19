@@ -63,7 +63,7 @@ async def lifespan(app: FastAPI):
         _poll_task.cancel()
 
 
-app = FastAPI(title="TrueDash Notifier", version="1.1.1", lifespan=lifespan)
+app = FastAPI(title="TrueDash Notifier", version="1.1.2", lifespan=lifespan)
 
 # The only relay we trust. The enrollment path skips notifier_secret auth and
 # relies on the relay vouching for the token, so the relay must NOT come from
@@ -99,8 +99,13 @@ async def _verify_enrollment(relay_url: str, token: str) -> tuple[str, str]:
         log.error(f"Enrollment verify failed: {type(e).__name__}")
         raise HTTPException(status_code=502, detail="Could not reach relay to verify enrollment token")
 
-    if resp.status_code != 200:
+    if resp.status_code == 401:
         raise HTTPException(status_code=401, detail="Invalid or expired enrollment token")
+    if resp.status_code != 200:
+        # Relay overloaded or down: the token may still be good, so don't tell
+        # the app it was rejected.
+        log.warning(f"Enrollment verify: relay returned {resp.status_code}")
+        raise HTTPException(status_code=502, detail="Relay could not verify the enrollment token")
 
     try:
         data = resp.json()
@@ -212,7 +217,7 @@ async def status(authorization: Optional[str] = Header(default=None)):
         # the last error text — so "why did notifications stop?" is answerable
         # from the app without reading container logs.
         **notifier.status_info(),
-        "version": "1.1.1",
+        "version": "1.1.2",
     }
 
 
@@ -247,6 +252,8 @@ async def test_wake(authorization: Optional[str] = Header(default=None)):
             status_code=401,
             detail="Credentials rotated — re-enroll with a fresh enrollment_token",
         )
+    if result == notifier_apns.RATE_LIMITED:
+        raise HTTPException(status_code=429, detail="Relay wake limit reached, try again later")
     if result != notifier_apns.OK:
         raise HTTPException(status_code=502, detail="Relay wake failed")
     log.info("Test wake sent to relay")
