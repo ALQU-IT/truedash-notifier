@@ -26,6 +26,9 @@ The app polls the local TrueNAS API. When an alert is detected, it sends a wake 
 - The app gives the Notifier only the `push_id` and `push_secret` — never the raw APNs device token
 - Wake calls contain only the `push_id` — no PII passes through the Notifier or its logs
 - Each device has its own secret, independently revokable
+- Several phones can share one notifier (1.2.0+): each keeps its own registration, a phone that
+  re-enrolls replaces only its own entry (recognised by the relay's opaque `device_id`), and
+  removing one phone leaves the others working
 
 ## Installation
 
@@ -37,7 +40,7 @@ Install and configure TrueDash Notifier directly from the TrueDash iOS app:
 
 ## API
 
-All endpoints require `Authorization: Bearer <notifier_secret>`. On first registration, the Bearer must match the `notifier_secret` field in the request body.
+All endpoints require `Authorization: Bearer <notifier_secret>` (each phone has its own). Registering with an `enrollment_token` is authenticated by the relay instead. `DELETE /api/unregister` removes only the calling phone and returns `remaining_devices`, so the app removes the container only when no phone is left.
 
 | Method | Path | Description |
 |---|---|---|

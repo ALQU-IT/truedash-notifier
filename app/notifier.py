@@ -21,13 +21,18 @@ _check_lock = asyncio.Lock()
 # Persisted across restarts (single uvicorn worker only — see docker-entrypoint.sh):
 #   dedup            per-pool space/health thresholds, so we alert on transitions
 #   app_updates      sorted identities of apps with an update pending
-#   credentials_stale True after the relay rotated our push credentials
+#   stale            push_ids whose credentials the relay no longer accepts
+#                    (rotated, or the device token retired); that phone must
+#                    re-enroll
+#   wake_pending     push_ids whose last alert wake didn't reach the relay;
+#                    retried on every later check until one succeeds
 # Persisting means a routine container update no longer replays every standing
 # alert, and the re-enroll signal is not lost on restart.
 _persist: dict = {
     "dedup": {},
     "app_updates": [],
-    "credentials_stale": False,
+    "stale": [],
+    "wake_pending": [],
 }
 
 # Volatile diagnostics (reset on restart, surfaced via /api/status).
@@ -48,8 +53,12 @@ def load_state() -> None:
         return
     if isinstance(data, dict):
         for key in _persist:
-            if key in data:
+            if key in data and isinstance(data[key], type(_persist[key])):
                 _persist[key] = data[key]
+        # Before 1.2.0 the notifier served one phone and kept a single flag.
+        if data.get("credentials_stale") is True:
+            conf = cfg_module.load()
+            _persist["stale"] = [d.push_id for d in conf.devices] if conf else []
 
 
 def _save_state() -> None:
@@ -72,24 +81,46 @@ def _save_state() -> None:
 def reset_state() -> None:
     _persist["dedup"] = {}
     _persist["app_updates"] = []
-    _persist["credentials_stale"] = False
+    _persist["stale"] = []
+    _persist["wake_pending"] = []
     STATE_PATH.unlink(missing_ok=True)
 
 
-def credentials_stale() -> bool:
-    return bool(_persist.get("credentials_stale"))
+def _set_flag(key: str, push_id: str, on: bool) -> None:
+    ids = _persist[key]
+    if on and push_id not in ids:
+        ids.append(push_id)
+    elif not on and push_id in ids:
+        ids.remove(push_id)
+    else:
+        return
+    _save_state()
 
 
-def mark_credentials_stale() -> None:
-    if not _persist.get("credentials_stale"):
-        _persist["credentials_stale"] = True
-        _save_state()
+def credentials_stale(push_id: str) -> bool:
+    return push_id in _persist["stale"]
 
 
-def clear_credentials_stale() -> None:
-    if _persist.get("credentials_stale"):
-        _persist["credentials_stale"] = False
-        _save_state()
+def mark_credentials_stale(push_id: str) -> None:
+    _set_flag("stale", push_id, True)
+
+
+def clear_credentials_stale(push_id: str) -> None:
+    _set_flag("stale", push_id, False)
+
+
+def wake_pending(push_id: str) -> bool:
+    return push_id in _persist["wake_pending"]
+
+
+def mark_wake_pending(push_id: str) -> None:
+    _set_flag("wake_pending", push_id, True)
+
+
+def forget_device(push_id: str) -> None:
+    """Drops a phone's flags once it is no longer registered here."""
+    for key in ("stale", "wake_pending"):
+        _set_flag(key, push_id, False)
 
 
 def status_info() -> dict:
@@ -147,17 +178,29 @@ async def _check_and_notify() -> None:
     # Persist the updated thresholds regardless of whether we wake.
     _save_state()
 
+    # A wake that failed earlier is retried: its alert is already recorded in
+    # dedup, so no later transition would ever trigger it again. The app reads
+    # the server's current state when the push lands, so a late wake is fine.
+    # While credentials are stale a retry can only fail; re-enrollment runs a
+    # check straight away, which sends it.
     triggered = space_triggered or health_triggered or updates_triggered
-    if triggered:
-        result = await apns.wake(conf.push_id, conf.relay_url, conf.push_secret)
+    for device in conf.devices:
+        pid = device.push_id
+        retry = wake_pending(pid) and not credentials_stale(pid)
+        if not (triggered or retry):
+            continue
+        result = await apns.wake(pid, conf.relay_url, device.push_secret)
+        _set_flag("wake_pending", pid, result != apns.OK)
         if result == apns.OK:
-            log.info("Wake sent to relay")
+            log.info(f"Wake sent to relay (push_id ...{pid[-6:]})")
         elif result == apns.UNAUTHORIZED:
             # Credentials rotated by the relay — flag for re-enrollment.
-            mark_credentials_stale()
-            log.warning("Wake unauthorized — awaiting re-enrollment from app")
+            mark_credentials_stale(pid)
+            log.warning(f"Wake unauthorized (push_id ...{pid[-6:]}) — awaiting re-enrollment from app")
+        elif result == apns.RATE_LIMITED:
+            log.warning(f"Wake skipped (push_id ...{pid[-6:]}) — relay rate limit reached")
         else:
-            log.warning("Wake delivery failed")
+            log.warning(f"Wake delivery failed (push_id ...{pid[-6:]})")
 
 
 def _check_pool_space(pools: list) -> bool:
