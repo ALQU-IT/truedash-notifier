@@ -13,7 +13,13 @@ RATE_LIMITED = "rate_limited"
 ERROR = "error"
 
 
-async def wake(push_id: str, relay_url: str, push_secret: str) -> str:
+# Wake kinds the relay (2.4.0+) passes to the app's notification extension.
+# None is an ordinary alert.
+KIND_TEST = "test"
+KIND_UNREACHABLE = "unreachable"
+
+
+async def wake(push_id: str, relay_url: str, push_secret: str, kind: str | None = None) -> str:
     """Sends a wake signal to the relay using the opaque push_id.
     The relay resolves the device token internally — it never passes through here.
     Returns one of OK / UNAUTHORIZED / RATE_LIMITED / ERROR."""
@@ -22,7 +28,9 @@ async def wake(push_id: str, relay_url: str, push_secret: str) -> str:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
                 url,
-                json={"push_id": push_id},
+                # Relays before 2.4.0 ignore `kind`; the app then shows its
+                # generic alert text.
+                json={"push_id": push_id, **({"kind": kind} if kind else {})},
                 headers={"Authorization": f"Bearer {push_secret}"},
             )
     except Exception as e:
