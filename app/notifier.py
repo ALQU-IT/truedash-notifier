@@ -26,6 +26,11 @@ _check_lock = asyncio.Lock()
 #                    re-enroll
 #   wake_pending     push_ids whose last alert wake didn't reach the relay;
 #                    retried on every later check until one succeeds
+#   alerts           ids of TrueNAS's own ERROR-or-worse alerts already seen;
+#                    None until the first successful check, which only records
+#                    them, so an update doesn't push every standing alert
+#   failing_since    ISO time of the first failed TrueNAS check in a row
+#   unreachable_sent whether the phones were told about that failure
 # Persisting means a routine container update no longer replays every standing
 # alert, and the re-enroll signal is not lost on restart.
 _persist: dict = {
@@ -33,7 +38,32 @@ _persist: dict = {
     "app_updates": [],
     "stale": [],
     "wake_pending": [],
+    "alerts": None,
+    "failing_since": None,
+    "unreachable_sent": False,
 }
+
+# Types of the persisted keys, for loading (None-able keys can't use the default's type).
+_PERSIST_TYPES = {
+    "dedup": dict,
+    "app_updates": list,
+    "stale": list,
+    "wake_pending": list,
+    "alerts": list,
+    "failing_since": str,
+    "unreachable_sent": bool,
+}
+
+# Tell the phones once when TrueNAS has been unreachable this long (seconds).
+UNREACHABLE_AFTER = int(os.getenv("UNREACHABLE_AFTER", "3600"))
+
+# TrueNAS alert levels that wake the phone (its own alerts: SMART, scrub,
+# replication, ...). INFO, NOTICE and WARNING don't.
+ALERT_LEVELS = {"ERROR", "CRITICAL", "ALERT", "EMERGENCY"}
+
+# Pool states from best to worst; a move to a worse one alerts. Anything not
+# listed counts as bad (2).
+_POOL_SEVERITY = {"ONLINE": 0, "DEGRADED": 1, "FAULTED": 2, "OFFLINE": 2, "UNAVAIL": 3, "REMOVED": 3}
 
 # Volatile diagnostics (reset on restart, surfaced via /api/status).
 _last_check: Optional[datetime] = None
@@ -53,7 +83,7 @@ def load_state() -> None:
         return
     if isinstance(data, dict):
         for key in _persist:
-            if key in data and isinstance(data[key], type(_persist[key])):
+            if key in data and isinstance(data[key], _PERSIST_TYPES[key]):
                 _persist[key] = data[key]
         # Before 1.2.0 the notifier served one phone and kept a single flag.
         if data.get("credentials_stale") is True:
@@ -83,6 +113,9 @@ def reset_state() -> None:
     _persist["app_updates"] = []
     _persist["stale"] = []
     _persist["wake_pending"] = []
+    _persist["alerts"] = None
+    _persist["failing_since"] = None
+    _persist["unreachable_sent"] = False
     STATE_PATH.unlink(missing_ok=True)
 
 
@@ -149,10 +182,16 @@ async def _check_and_notify() -> None:
     try:
         # One socket, authenticated once, reused for every query this cycle.
         async with truenas.connect(
-            conf.truenas_host, conf.truenas_port, conf.truenas_api_key, conf.verify_tls
+            conf.truenas_host, conf.truenas_port, conf.truenas_api_key, conf.verify_tls,
+            conf.truenas_username,
         ) as tn:
             pools_raw = await tn.pools()
             apps_raw = await tn.apps()
+            try:
+                alerts_raw = await tn.alerts()
+            except Exception:
+                # Alerts are additive: losing them must not fail the check.
+                alerts_raw = None
 
             # Enrich pools with logical dataset space.
             for pool in pools_raw:
@@ -167,14 +206,18 @@ async def _check_and_notify() -> None:
         _last_check_ok = False
         _last_error = f"{type(e).__name__}: {e}"
         log.warning(f"TrueNAS fetch failed: {_last_error}")
+        await _note_unreachable(conf)
         return
 
     _last_check_ok = True
     _last_error = None
+    _persist["failing_since"] = None
+    _persist["unreachable_sent"] = False
 
     space_triggered = _check_pool_space(pools_raw)
     health_triggered = _check_pool_health(pools_raw)
     updates_triggered = _check_app_updates(apps_raw)
+    alerts_triggered = _check_alerts(alerts_raw) if alerts_raw is not None else False
     # Persist the updated thresholds regardless of whether we wake.
     _save_state()
 
@@ -183,13 +226,18 @@ async def _check_and_notify() -> None:
     # the server's current state when the push lands, so a late wake is fine.
     # While credentials are stale a retry can only fail; re-enrollment runs a
     # check straight away, which sends it.
-    triggered = space_triggered or health_triggered or updates_triggered
+    triggered = space_triggered or health_triggered or updates_triggered or alerts_triggered
+    await _wake_devices(conf, triggered)
+
+
+async def _wake_devices(conf, triggered: bool, kind: Optional[str] = None) -> None:
+    """Wakes every phone when `triggered`, and retries earlier failed wakes."""
     for device in conf.devices:
         pid = device.push_id
         retry = wake_pending(pid) and not credentials_stale(pid)
         if not (triggered or retry):
             continue
-        result = await apns.wake(pid, conf.relay_url, device.push_secret)
+        result = await apns.wake(pid, conf.relay_url, device.push_secret, kind if triggered else None)
         _set_flag("wake_pending", pid, result != apns.OK)
         if result == apns.OK:
             log.info(f"Wake sent to relay (push_id ...{pid[-6:]})")
@@ -201,6 +249,49 @@ async def _check_and_notify() -> None:
             log.warning(f"Wake skipped (push_id ...{pid[-6:]}) — relay rate limit reached")
         else:
             log.warning(f"Wake delivery failed (push_id ...{pid[-6:]})")
+
+
+async def _note_unreachable(conf) -> None:
+    """After UNREACHABLE_AFTER seconds of failed checks in a row, wakes the
+    phones once so they learn alerts can't be checked (API key revoked or
+    expired, TrueNAS address changed). Reset by the next good check."""
+    now = datetime.now(timezone.utc)
+    since = _persist.get("failing_since")
+    if since is None:
+        _persist["failing_since"] = now.isoformat()
+        _save_state()
+        return
+    try:
+        started = datetime.fromisoformat(since)
+    except ValueError:
+        _persist["failing_since"] = now.isoformat()
+        _save_state()
+        return
+    if _persist.get("unreachable_sent") or (now - started).total_seconds() < UNREACHABLE_AFTER:
+        return
+    _persist["unreachable_sent"] = True
+    _save_state()
+    log.warning("TrueNAS unreachable for a while — telling the phones")
+    await _wake_devices(conf, True, apns.KIND_UNREACHABLE)
+
+
+def _check_alerts(alerts: list) -> bool:
+    """Wakes for a new TrueNAS alert of level ERROR or worse. The first check
+    only records the standing ones."""
+    current = sorted({
+        str(a.get("uuid") or a.get("id") or a.get("key") or a.get("formatted"))
+        for a in alerts
+        if isinstance(a, dict)
+        and not a.get("dismissed")
+        and str(a.get("level", "")).upper() in ALERT_LEVELS
+        and (a.get("uuid") or a.get("id") or a.get("key") or a.get("formatted"))
+    })
+    previous = _persist.get("alerts")
+    _persist["alerts"] = current
+    if previous is None:
+        return False
+    seen = set(previous)
+    return any(a not in seen for a in current)
 
 
 def _check_pool_space(pools: list) -> bool:
@@ -235,7 +326,9 @@ def _check_pool_health(pools: list) -> bool:
         status = pool.get("status", "ONLINE").upper()
         key = f"pool_health_{pid}"
         last = dedup.get(key, "ONLINE")
-        if status != "ONLINE" and last == "ONLINE":
+        # Any move to a worse state alerts: ONLINE → DEGRADED, and also
+        # DEGRADED → FAULTED when a second disk goes.
+        if _POOL_SEVERITY.get(status, 2) > _POOL_SEVERITY.get(str(last).upper(), 2):
             triggered = True
         dedup[key] = status
     return triggered

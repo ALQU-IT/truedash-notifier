@@ -9,8 +9,10 @@ A lightweight app for TrueNAS SCALE that delivers push notifications to the True
 Polls your TrueNAS server every 10 minutes and sends a push notification when:
 
 - **Pool space** drops below 20% free (clears above 25%)
-- **Pool health** changes from ONLINE (degraded, faulted, etc.)
-- **App updates** become available (notifies when the count increases)
+- **Pool health** gets worse (ONLINE to DEGRADED, and again DEGRADED to FAULTED, etc.)
+- **App updates** become available (each app that newly has an update)
+- **TrueNAS alerts** of level ERROR or worse appear (SMART, scrub, replication, ...)
+- **TrueNAS can't be reached** for an hour (API key revoked or expired, address changed): the phones are told once
 
 ## How it works
 
@@ -40,7 +42,7 @@ Install and configure TrueDash Notifier directly from the TrueDash iOS app:
 
 ## API
 
-All endpoints require `Authorization: Bearer <notifier_secret>` (each phone has its own). Registering with an `enrollment_token` is authenticated by the relay instead. `DELETE /api/unregister` removes only the calling phone and returns `remaining_devices`, so the app removes the container only when no phone is left.
+All endpoints require `Authorization: Bearer <notifier_secret>` (each phone has its own). Registering with an `enrollment_token` is authenticated by the relay instead. Once a phone is registered, a *new* phone is accepted only if its TrueNAS API key logs in to the TrueNAS the notifier already watches (1.3.0), and a full notifier (10 phones) answers `409` instead of dropping one. `DELETE /api/unregister` removes only the calling phone and returns `remaining_devices`, so the app removes the container only when no phone is left.
 
 | Method | Path | Description |
 |---|---|---|
@@ -54,7 +56,8 @@ All endpoints require `Authorization: Bearer <notifier_secret>` (each phone has 
 | Field | Default | Description |
 |---|---|---|
 | `poll_interval` | `600` | Seconds between checks (min 60) |
-| `verify_tls` | `true` | Verify TrueNAS TLS certificate (set to `false` for self-signed certs) |
+| `verify_tls` | `false` | Verify TrueNAS TLS certificate (TrueNAS ships a self-signed one). Never verified for `host.docker.internal`, which stays on the machine |
+| `truenas_username` | none | The API key's username; used for `auth.login_ex` (needed from TrueNAS 27) |
 
 ## Requirements
 

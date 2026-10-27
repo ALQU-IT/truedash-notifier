@@ -14,6 +14,7 @@ import apns as notifier_apns
 import certgen
 import config as cfg_module
 import notifier
+import truenas
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,7 +64,7 @@ async def lifespan(app: FastAPI):
         _poll_task.cancel()
 
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 app = FastAPI(title="TrueDash Notifier", version=VERSION, lifespan=lifespan)
 
@@ -124,11 +125,30 @@ async def _verify_enrollment(relay_url: str, token: str) -> tuple[str, str, Opti
     return push_id, push_secret, device_id if isinstance(device_id, str) and device_id else None
 
 
+async def _require_working_key(existing: cfg_module.Config, req: "RegisterRequest") -> None:
+    """The new phone's API key must log in to the TrueNAS this notifier already
+    watches (the stored address, not the one in the request, which the caller
+    controls)."""
+    username = req.truenas_username or existing.truenas_username
+    try:
+        async with truenas.connect(existing.truenas_host, existing.truenas_port,
+                                   req.truenas_api_key, existing.verify_tls, username):
+            pass
+    except truenas.TrueNASError:
+        raise HTTPException(status_code=403, detail="API key not accepted by TrueNAS")
+    except Exception as e:
+        log.warning(f"Could not check the API key with TrueNAS: {type(e).__name__}")
+        raise HTTPException(status_code=502, detail="Could not reach TrueNAS to check the API key")
+
+
 class RegisterRequest(BaseModel):
     relay_url: str
     notifier_secret: str
     truenas_host: str
     truenas_api_key: str
+    # The API key's username, for auth.login_ex (TrueDash 6.0.7+). When omitted
+    # on re-registration the stored one is kept.
+    truenas_username: Optional[str] = None
     truenas_port: int = 443
     verify_tls: bool = False
     # Notifier-owned setting: when omitted on re-registration the existing
@@ -190,10 +210,19 @@ async def register(
     # (re-)registered replaces only its own entry: matched by the relay's
     # device_id, else by its notifier_secret.
     device_id = None
+    # A phone this notifier already serves may change the TrueNAS settings. A
+    # new phone joining others must prove it holds a working TrueNAS API key:
+    # anyone can get an enrollment token from the relay (its registration key
+    # ships in the app), so the token alone doesn't show the caller owns this
+    # NAS (review H1, 1.3.0).
+    known = bool(existing and (existing.device_for_secret(req.notifier_secret)
+                               or existing.device_for_secret(_bearer(authorization))))
     if req.enrollment_token:
         # Redeem the single-use token exactly once; on failure the app must
         # request a fresh enrollment rather than retrying this dead token.
         push_id, push_secret, device_id = await _verify_enrollment(TRUSTED_RELAY_URL, req.enrollment_token)
+        if device_id and existing and any(d.device_id == device_id for d in existing.devices):
+            known = True
         if device_id:
             # Entries without a device_id predate it (one phone per notifier,
             # or an older relay), so the first phone with one takes them over,
@@ -215,16 +244,20 @@ async def register(
         bearer = _bearer(authorization)
         same = lambda d: hmac.compare_digest(d.notifier_secret, bearer)
 
+    if existing and existing.devices and not known:
+        await _require_working_key(existing, req)
+
     replaced = [d for d in devices if same(d)]
     devices = [d for d in devices if not same(d)]
+    if len(devices) >= cfg_module.MAX_DEVICES:
+        # Full: refuse rather than push out a phone that still uses it.
+        raise HTTPException(status_code=409, detail="Too many devices registered")
     devices.append(cfg_module.Device(
         push_id=push_id,
         push_secret=push_secret,
         notifier_secret=req.notifier_secret,
         device_id=device_id,
     ))
-    dropped = devices[:-cfg_module.MAX_DEVICES]
-    devices = devices[-cfg_module.MAX_DEVICES:]
 
     # Preserve a previously customized poll_interval when the app omits it.
     if req.poll_interval is not None:
@@ -234,12 +267,17 @@ async def register(
     else:
         poll_interval = 600
 
+    username = req.truenas_username
+    if username is None and existing is not None:
+        username = existing.truenas_username
+
     conf = cfg_module.Config(
         devices=devices,
         relay_url=TRUSTED_RELAY_URL,
         truenas_host=req.truenas_host,
         truenas_port=req.truenas_port,
         truenas_api_key=req.truenas_api_key,
+        truenas_username=username,
         verify_tls=req.verify_tls,
         poll_interval=poll_interval,
     )
@@ -248,7 +286,7 @@ async def register(
     # check below delivers it with the fresh ones.
     if any(notifier.wake_pending(d.push_id) for d in replaced):
         notifier.mark_wake_pending(push_id)
-    for d in replaced + dropped:
+    for d in replaced:
         notifier.forget_device(d.push_id)
     log.info(f"Device registered with push_id: ...{push_id[-6:]} ({len(devices)} device(s))")
     task = asyncio.create_task(notifier.check_and_notify())
@@ -301,7 +339,8 @@ async def test_wake(authorization: Optional[str] = Header(default=None)):
     if last and (now - last).total_seconds() < TEST_COOLDOWN:
         raise HTTPException(status_code=429, detail="Test cooldown active")
     _last_test[device.push_id] = now
-    result = await notifier_apns.wake(device.push_id, conf.relay_url, device.push_secret)
+    result = await notifier_apns.wake(device.push_id, conf.relay_url, device.push_secret,
+                                      notifier_apns.KIND_TEST)
     if result == notifier_apns.UNAUTHORIZED:
         notifier.mark_credentials_stale(device.push_id)
         raise HTTPException(

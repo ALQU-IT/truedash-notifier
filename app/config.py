@@ -33,6 +33,8 @@ class Config(BaseModel):
     truenas_host: str
     truenas_port: int = 443
     truenas_api_key: str
+    # The API key's username, for auth.login_ex (sent by TrueDash 6.0.7+).
+    truenas_username: Optional[str] = None
     verify_tls: bool = False
     poll_interval: int = Field(default=600, ge=60)
 
