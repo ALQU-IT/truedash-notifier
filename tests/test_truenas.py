@@ -80,3 +80,20 @@ def test_no_username_uses_old_login(tmp_path):
 def test_local_host_never_verifies():
     assert truenas.Client(truenas.LOCAL_HOST, 443, "k", verify=True)._verify is False
     assert truenas.Client("nas.lan", 443, "k", verify=True)._verify is True
+
+
+def test_default_gateway_parsed(tmp_path):
+    route = tmp_path / "route"
+    route.write_text(
+        "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\n"
+        "eth0\t00000000\t010011AC\t0003\t0\t0\t0\t00000000\n"
+        "eth0\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\n"
+    )
+    assert truenas._default_gateway(str(route)) == "172.17.0.1"
+
+
+def test_no_gateway(tmp_path):
+    route = tmp_path / "route"
+    route.write_text("Iface\tDestination\tGateway\n")
+    assert truenas._default_gateway(str(route)) is None
+    assert truenas._default_gateway(str(tmp_path / "missing")) is None

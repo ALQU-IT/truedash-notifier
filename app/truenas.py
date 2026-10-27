@@ -10,6 +10,7 @@ import asyncio
 import itertools
 import json
 import logging
+import socket
 import ssl
 
 import websockets
@@ -34,6 +35,8 @@ class Client:
 
     def __init__(self, host: str, port: int, api_key: str, verify: bool = True,
                  username: str | None = None):
+        self._host = host
+        self._port = port
         self._uri = f"wss://{host}:{port}/api/current"
         self._api_key = api_key
         self._username = (username or "").strip()
@@ -46,8 +49,11 @@ class Client:
         if not self._verify:
             ssl_ctx.check_hostname = False
             ssl_ctx.verify_mode = ssl.CERT_NONE
+        uri = self._uri
+        if self._host == LOCAL_HOST:
+            uri = f"wss://{await _local_host_address()}:{self._port}/api/current"
         self._ws = await websockets.connect(
-            self._uri,
+            uri,
             ssl=ssl_ctx,
             max_size=MAX_RESPONSE_BYTES,
             open_timeout=15,
@@ -129,6 +135,34 @@ class Client:
 def connect(host: str, port: int, api_key: str, verify: bool = True,
             username: str | None = None) -> Client:
     return Client(host, port, api_key, verify, username)
+
+
+async def _local_host_address() -> str:
+    """host.docker.internal when the compose maps it (TrueDash 6.0.7+), else
+    the container's default gateway, which is the Docker host too."""
+    try:
+        await asyncio.get_running_loop().getaddrinfo(LOCAL_HOST, None)
+        return LOCAL_HOST
+    except OSError:
+        pass
+    gateway = _default_gateway()
+    if gateway is None:
+        raise TrueNASError(f"{LOCAL_HOST} doesn't resolve and no default gateway was found")
+    return gateway
+
+
+def _default_gateway(route_file: str = "/proc/net/route") -> str | None:
+    """The IPv4 default gateway from the kernel's routing table."""
+    try:
+        with open(route_file) as f:
+            next(f, None)
+            for line in f:
+                fields = line.split()
+                if len(fields) > 2 and fields[1] == "00000000" and fields[2] != "00000000":
+                    return socket.inet_ntoa(int(fields[2], 16).to_bytes(4, "little"))
+    except OSError:
+        return None
+    return None
 
 
 def _is_unknown_method(message: str) -> bool:

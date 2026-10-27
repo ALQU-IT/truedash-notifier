@@ -357,4 +357,6 @@ async def test_wake(authorization: Optional[str] = Header(default=None)):
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "cert_fingerprint": _cert_fingerprint}
+    # The version lets the app tell, before this phone is registered, whether
+    # the notifier understands host.docker.internal (1.3.0+).
+    return {"ok": True, "cert_fingerprint": _cert_fingerprint, "version": VERSION}
