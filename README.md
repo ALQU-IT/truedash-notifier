@@ -42,6 +42,8 @@ Install and configure TrueDash Notifier directly from the TrueDash iOS app:
 
 ## API
 
+Requests over 16 KB get `413`, and a client that fails authentication 30 times in a minute gets `429` for the rest of that minute (1.3.1).
+
 All endpoints require `Authorization: Bearer <notifier_secret>` (each phone has its own). Registering with an `enrollment_token` is authenticated by the relay instead. Once a phone is registered, a *new* phone is accepted only if its TrueNAS API key logs in to the TrueNAS the notifier already watches (1.3.0), and a full notifier (10 phones) answers `409` instead of dropping one. `DELETE /api/unregister` removes only the calling phone and returns `remaining_devices`, so the app removes the container only when no phone is left.
 
 | Method | Path | Description |

@@ -1,7 +1,9 @@
 import asyncio
+import collections
 import hmac
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
@@ -64,9 +66,91 @@ async def lifespan(app: FastAPI):
         _poll_task.cancel()
 
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
+
+# Largest request body accepted; a real /api/register is well under 2 KB.
+MAX_BODY_BYTES = 16 * 1024
+# Failed authentications (401/403) one client may cause per minute before it
+# gets 429. Generous because Docker often shows every LAN client as the
+# bridge gateway, so the count is shared; a phone never fails this often, while a LAN client guessing secrets or
+# trying TrueNAS API keys through /api/register is slowed to a crawl.
+AUTH_FAILURES_PER_MIN = 30
+_auth_failures: dict[str, collections.deque] = {}
+
+
+def _failure_count(ip: str, now: float) -> int:
+    dq = _auth_failures.get(ip)
+    if dq is None:
+        return 0
+    while dq and dq[0] < now - 60:
+        dq.popleft()
+    if not dq:
+        del _auth_failures[ip]
+        return 0
+    return len(dq)
+
+
+class GuardMiddleware:
+    """Pure ASGI: refuses oversized bodies with 413 before a route buffers
+    them, and throttles clients that keep failing authentication."""
+
+    def __init__(self, app):
+        self.app = app
+
+    @staticmethod
+    async def _answer(send, status: int, detail: str) -> None:
+        body = ('{"detail":"%s"}' % detail).encode()
+        await send({"type": "http.response.start", "status": status,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"content-length", str(len(body)).encode())]})
+        await send({"type": "http.response.body", "body": body})
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        ip = (scope.get("client") or ("unknown", 0))[0]
+        if _failure_count(ip, time.monotonic()) >= AUTH_FAILURES_PER_MIN:
+            await self._answer(send, 429, "Too many failed attempts, try again in a minute")
+            return
+        for name, value in scope.get("headers", []):
+            if name == b"content-length":
+                try:
+                    too_big = int(value) > MAX_BODY_BYTES
+                except ValueError:
+                    too_big = True
+                if too_big:
+                    await self._answer(send, 413, "Request body too large")
+                    return
+        messages, size = [], 0
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                messages.append(message)
+                break
+            size += len(message.get("body", b""))
+            if size > MAX_BODY_BYTES:
+                await self._answer(send, 413, "Request body too large")
+                return
+            messages.append(message)
+            if not message.get("more_body", False):
+                break
+
+        async def replay():
+            if messages:
+                return messages.pop(0)
+            return await receive()
+
+        async def watch(message):
+            if message["type"] == "http.response.start" and message["status"] in (401, 403):
+                _auth_failures.setdefault(ip, collections.deque()).append(time.monotonic())
+            await send(message)
+
+        await self.app(scope, replay, watch)
+
 
 app = FastAPI(title="TrueDash Notifier", version=VERSION, lifespan=lifespan)
+app.add_middleware(GuardMiddleware)
 
 # The only relay we trust. The enrollment path skips notifier_secret auth and
 # relies on the relay vouching for the token, so the relay must NOT come from

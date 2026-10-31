@@ -96,3 +96,19 @@ def test_test_wake_sends_test_kind(client, env):
     resp = client.post("/api/test", headers={"Authorization": "Bearer secret-a-1"})
     assert resp.status_code == 200
     assert env.wakes[-1]["kind"] == "test"
+
+
+def test_oversized_body_rejected(client):
+    body = register_body("a")
+    body["truenas_api_key"] = "k" * (20 * 1024)
+    assert client.post("/api/register", json=body).status_code == 413
+
+
+def test_repeated_auth_failures_throttled(client, env):
+    assert client.post("/api/register", json=register_body("a")).status_code == 200
+    for _ in range(env.main.AUTH_FAILURES_PER_MIN):
+        assert client.get("/api/status", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.get("/api/status", headers={"Authorization": "Bearer wrong"}).status_code == 429
+    env.main._auth_failures.clear()
+    ok = client.get("/api/status", headers={"Authorization": "Bearer secret-a-1"})
+    assert ok.status_code == 200
