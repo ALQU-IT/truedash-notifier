@@ -90,6 +90,15 @@ def _failure_count(ip: str, now: float) -> int:
     return len(dq)
 
 
+def _holds_valid_secret(scope) -> bool:
+    """Whether the request's Bearer token is a registered phone's notifier_secret."""
+    for name, value in scope.get("headers", []):
+        if name == b"authorization":
+            conf = cfg_module.load()
+            return bool(conf and conf.device_for_secret(_bearer(value.decode("latin-1"))))
+    return False
+
+
 class GuardMiddleware:
     """Pure ASGI: refuses oversized bodies with 413 before a route buffers
     them, and throttles clients that keep failing authentication."""
@@ -110,7 +119,11 @@ class GuardMiddleware:
             await self.app(scope, receive, send)
             return
         ip = (scope.get("client") or ("unknown", 0))[0]
-        if _failure_count(ip, time.monotonic()) >= AUTH_FAILURES_PER_MIN:
+        if (_failure_count(ip, time.monotonic()) >= AUTH_FAILURES_PER_MIN
+                and scope.get("path") != "/health" and not _holds_valid_secret(scope)):
+            # Only callers without a working secret are held back: Docker may
+            # show every LAN client with the same address, so a phone that
+            # proves itself must not be locked out by someone else's failures.
             await self._answer(send, 429, "Too many failed attempts, try again in a minute")
             return
         for name, value in scope.get("headers", []):
@@ -149,7 +162,9 @@ class GuardMiddleware:
         await self.app(scope, replay, watch)
 
 
-app = FastAPI(title="TrueDash Notifier", version=VERSION, lifespan=lifespan)
+# No interactive docs: the API is for the TrueDash app only.
+app = FastAPI(title="TrueDash Notifier", version=VERSION, lifespan=lifespan,
+              docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(GuardMiddleware)
 
 # The only relay we trust. The enrollment path skips notifier_secret auth and

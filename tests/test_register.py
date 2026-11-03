@@ -109,6 +109,23 @@ def test_repeated_auth_failures_throttled(client, env):
     for _ in range(env.main.AUTH_FAILURES_PER_MIN):
         assert client.get("/api/status", headers={"Authorization": "Bearer wrong"}).status_code == 401
     assert client.get("/api/status", headers={"Authorization": "Bearer wrong"}).status_code == 429
-    env.main._auth_failures.clear()
+    assert client.post("/api/register", json=register_body("b")).status_code == 429
+
+
+def test_valid_phone_not_locked_out_by_others_failures(client, env):
+    # Docker can show every LAN client with one address, so failures from a
+    # stranger must not lock out a phone that presents its own secret.
+    assert client.post("/api/register", json=register_body("a")).status_code == 200
+    for _ in range(env.main.AUTH_FAILURES_PER_MIN):
+        client.get("/api/status", headers={"Authorization": "Bearer wrong"})
+    assert client.get("/api/status", headers={"Authorization": "Bearer wrong"}).status_code == 429
     ok = client.get("/api/status", headers={"Authorization": "Bearer secret-a-1"})
     assert ok.status_code == 200
+    assert client.post("/api/register", json=register_body("a"),
+                       headers={"Authorization": "Bearer secret-a-1"}).status_code == 200
+    assert client.get("/health").status_code == 200
+
+
+def test_no_interactive_docs(client):
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert client.get(path).status_code == 404
