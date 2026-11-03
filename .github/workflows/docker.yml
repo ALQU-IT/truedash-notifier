@@ -7,6 +7,10 @@ on:
   pull_request:
     branches: [main]
 
+# The default token gets read-only access; only the build job may push packages.
+permissions:
+  contents: read
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
@@ -31,6 +35,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # The docker-container builder can attach provenance and SBOM
+      # attestations; the default docker driver can't.
+      - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'
@@ -60,3 +68,8 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Signed build provenance and a software bill of materials, stored
+          # with the image in the registry (docker buildx imagetools inspect).
+          # Only when pushing: a PR build has nowhere to store them.
+          provenance: ${{ github.event_name != 'pull_request' && 'mode=max' || 'false' }}
+          sbom: ${{ github.event_name != 'pull_request' }}
